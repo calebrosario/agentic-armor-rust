@@ -1,6 +1,60 @@
 # Agentic Armor (Rust)
 
-> Rust port of agentic-armor — hardened container sandbox execution for AI agents via MCP. Supports both Docker and Podman.
+> One binary. Zero dependencies. Hardened AI agent sandboxes via MCP. Docker + Podman.
+
+**Agentic Armor** gives AI agents (Claude Code, OpenCode, Cursor, Codex, Windsurf) the ability to run code inside hardened, isolated containers — without touching your host filesystem. One 7.3MB Rust binary. No Node.js, no PostgreSQL, no external services.
+
+## Why Agentic Armor?
+
+| Without Agentic Armor | With Agentic Armor |
+|----------------------|-------------------|
+| Agent runs `rm -rf ~/Documents` on your Mac | Agent runs inside a container — can't see your home directory |
+| Agent reads `~/.ssh/id_rsa` and exfiltrates it | SSH keys don't exist inside the container |
+| Agent installs malware via `curl \| sh` | `cap-drop: ALL`, `no-new-privileges`, no network by default |
+| You babysit permission prompts all day | Agent runs autonomously in isolation — you review when done |
+| Agent needs Node.js + npm + PostgreSQL installed | One binary, SQLite embedded, zero external dependencies |
+
+## One Binary, Zero Dependencies
+
+```
+7.3MB binary
+├── Embedded SQLite database (auto-created on first run)
+├── MCP server (stdio transport — talks to any AI agent)
+├── Docker + Podman manager (auto-detects which is running)
+├── 8 tools (create, exec, upload, download, list, stop, delete, logs)
+└── Security hardening (cap-drop, readonly rootfs, network isolation)
+```
+
+No Node.js runtime. No npm install. No PostgreSQL container. No Docker Compose for the database. Just:
+
+```bash
+./agentic-armor
+```
+
+The SQLite database is auto-created at `./data/agentic_armor.db` on first run. Schema is auto-migrated. If you delete the file, it recreates itself.
+
+## Security Model
+
+Every container created by Agentic Armor is hardened — **non-overridable by design**:
+
+| Control | Value | Bypass Possible? |
+|---------|-------|-----------------|
+| Linux capabilities | `cap-drop: ALL` | ❌ Hardcoded |
+| Root filesystem | Read-only | ❌ Hardcoded |
+| Privilege escalation | `no-new-privileges` | ❌ Hardcoded |
+| Container user | `opencode` (non-root) | ❌ Hardcoded |
+| Network mode | `none` (no internet) | ❌ Default, only bridge allowed |
+| Docker socket mounts | Blocked (source + target, canonicalized) | ❌ Pattern + symlink check |
+| Image selection | Allowlist only | ❌ Enforced at runtime layer |
+| Memory | 512MB minimum | ❌ Clamped (never 0) |
+| Process limit | 100 PIDs | ❌ Clamped (10-1000) |
+| Max concurrent containers | 10 | ❌ DoS protection |
+| Path access (upload/download) | `/tmp/`, `/home/opencode/`, `/workspace/` only | ❌ Prefix + char allowlist |
+| Mount validation | Canonicalized paths + forbidden patterns | ❌ Symlink-aware |
+
+**What the agent CAN do:** edit files in `/workspace/`, run builds, execute tests, install packages (if network enabled), read/write to allowed paths.
+
+**What the agent CANNOT do:** read `~/.ssh/id_rsa`, access host filesystem, escalate to root, mount Docker socket, create unlimited containers, bypass the image allowlist, or reach the internet (by default).
 
 ## Container Runtime Support
 
@@ -113,9 +167,7 @@ cargo run           # Run test container lifecycle
 
 ### Prerequisites
 
-- **Docker** or **Podman** (for container execution)
-- **PostgreSQL** 14+ (for task persistence)
-- **Rust** 1.85+ (to build from source)
+- **Docker** or **Podman** (for sandbox containers — that's it)
 
 ### Install for Humans
 
@@ -128,42 +180,45 @@ cd agentic-armor-rust
 cargo build --release
 ```
 
-The binary is at `target/release/agentic-armor` (5.9MB, no runtime dependencies).
+The binary is at `target/release/agentic-armor` (7.3MB, no runtime dependencies).
 
-**Step 2: Start PostgreSQL**
-
-```bash
-docker run -d --name armor-pg \
-  -e POSTGRES_USER=opencode \
-  -e POSTGRES_PASSWORD=opencode \
-  -e POSTGRES_DB=agentic_armor \
-  -p 5433:5432 \
-  postgres:16-alpine
-```
-
-**Step 3: Set environment variables**
+**Step 2: Verify it works**
 
 ```bash
-export DATABASE_URL="postgresql://opencode:opencode@localhost:5433/agentic_armor"
-export CONTAINER_RUNTIME=auto    # docker, podman, or auto
+./target/release/agentic-armor
+# → Auto-detects Docker/Podman
+# → Creates ./data/agentic_armor.db (SQLite, auto-migrated)
+# → Starts MCP server on stdio (8 tools)
 ```
 
-Add these to your `~/.zshrc` or `~/.bashrc` for persistence.
+That's it. No PostgreSQL. No Docker Compose for the database. No environment variables needed.
 
-**Step 4: Connect your AI agent** (see platform setup below)
+**Step 3: Connect your AI agent** (see platform setup below)
 
 ### Install for Agents
 
-Paste this to any AI agent (Claude Code, OpenCode, Codex, etc.) and it will set everything up:
+Paste this to any AI agent and it will set everything up:
 
 ```
-Set up agentic-armor-rust on this machine:
-1. Clone repos: git clone https://github.com/calebrosario/rust-mcp-sdk.git ~/Documents/sandbox/rust-mcp-sdk && git clone https://github.com/calebrosario/agentic-armor-rust.git ~/Documents/sandbox/agentic-armor-rust
-2. Build: cd ~/Documents/sandbox/agentic-armor-rust && cargo build --release
-3. Start PostgreSQL: docker run -d --name armor-pg -e POSTGRES_USER=opencode -e POSTGRES_PASSWORD=opencode -e POSTGRES_DB=agentic_armor -p 5433:5432 postgres:16-alpine
-4. Add to ~/.zshrc: export DATABASE_URL="postgresql://opencode:opencode@localhost:5433/agentic_armor"
-5. Verify: ~/Documents/sandbox/agentic-armor-rust/target/release/agentic-armor (should start MCP server on stdio)
+Set up agentic-armor-rust:
+1. Clone: git clone https://github.com/calebrosario/rust-mcp-sdk.git ~/Documents/sandbox/rust-mcp-sdk
+2. Clone: git clone https://github.com/calebrosario/agentic-armor-rust.git ~/Documents/sandbox/agentic-armor-rust
+3. Build: cd ~/Documents/sandbox/agentic-armor-rust && cargo build --release
+4. Test: ~/Documents/sandbox/agentic-armor-rust/target/release/agentic-armor (should start, create SQLite DB, connect to Docker)
+5. Add to ~/.config/opencode/opencode.json mcp section: {"agentic-armor": {"type":"local","command":["$HOME/Documents/sandbox/agentic-armor-rust/target/release/agentic-armor"],"enabled":true}}
 ```
+
+### Why No PostgreSQL?
+
+Agentic Armor uses **embedded SQLite** instead of PostgreSQL. The database is a single file (`./data/agentic_armor.db`) that:
+
+- Auto-creates on first run (zero setup)
+- Auto-migrates the schema
+- Handles the workload perfectly (single process, small dataset, ephemeral tasks)
+- Can be deleted and recreated at any time (tasks are ephemeral)
+- Requires zero configuration, zero ports, zero credentials
+
+The previous TypeScript version required PostgreSQL running in Docker — creating a circular dependency (Docker → PostgreSQL → agentic-armor → Docker). The Rust version eliminates this entirely.
 
 ---
 
