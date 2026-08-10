@@ -7,11 +7,6 @@ use serde_json::json;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
-const ALLOWED_IMAGES: &[&str] = &[
-    "opencode-sandbox-base:latest",
-    "opencode-sandbox-developer:latest",
-];
-
 pub async fn start(
     config: Arc<Config>,
     runtime: Arc<dyn ContainerRuntime>,
@@ -66,14 +61,28 @@ async fn register_task_create(
                 let cfg = cfg.clone();
                 async move {
                     let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("unknown");
+
+                    if task_id.is_empty() || task_id.len() > 128 ||
+                       !task_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                        return Ok(CallToolResult::error("Invalid taskId: must match ^[a-zA-Z0-9_-]{1,128}$"));
+                    }
+
                     let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("task");
                     let owner = args.get("owner").and_then(|v| v.as_str());
                     let image = args.get("image").and_then(|v| v.as_str()).unwrap_or("opencode-sandbox-developer:latest");
 
-                    if !ALLOWED_IMAGES.contains(&image) {
-                        return Ok(CallToolResult::error(format!(
-                            "Image '{}' not in allowlist: {:?}", image, ALLOWED_IMAGES
-                        )));
+                    if !cfg.allowed_images.iter().any(|img| img == image) {
+                        return Ok(CallToolResult::error("Image not allowed. Use a pre-approved sandbox image."));
+                    }
+
+                    let existing = reg.list(1000).await.unwrap_or_default();
+                    let active = existing.iter().filter(|t| {
+                        matches!(t.status, crate::task::TaskStatus::Pending | crate::task::TaskStatus::Running)
+                    }).count();
+                    if active >= 10 {
+                        return Ok(CallToolResult::error(
+                            format!("Maximum concurrent containers (10) reached. Delete existing tasks first. Active: {}", active)
+                        ));
                     }
 
                     let task = match lc.create_task(task_id, name, owner).await {
@@ -110,7 +119,12 @@ async fn register_task_create(
                         }
                     };
 
-                    rt.start_container(&container_id).await.ok();
+                    if let Err(e) = rt.start_container(&container_id).await {
+                        error!("Container start failed for {}: {}", container_id, e);
+                        let _ = rt.destroy_container(&container_id).await;
+                        let _ = lc.delete_task(task_id).await;
+                        return Ok(CallToolResult::error(format!("Container start failed: {}", e)));
+                    }
 
                     if let Err(e) = reg.set_container_id(task_id, &container_id).await {
                         error!("Failed to persist containerId: {}", e);
@@ -340,7 +354,7 @@ async fn register_task_list(server: &Arc<McpServer>, registry: &Arc<TaskRegistry
             .handler(move |args| {
                 let reg = reg.clone();
                 async move {
-                    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(100);
+                    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(100).min(1000).max(1);
                     let tasks = match reg.list(limit).await {
                         Ok(t) => t,
                         Err(e) => return Ok(CallToolResult::error(format!("Database error: {}", e))),
@@ -455,7 +469,7 @@ async fn register_task_logs(server: &Arc<McpServer>, registry: &Arc<TaskRegistry
                 let reg = reg.clone();
                 async move {
                     let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
-                    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(100);
+                    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(100).min(1000).max(1);
 
                     let logs = match reg.get_logs(task_id, limit).await {
                         Ok(l) => l,

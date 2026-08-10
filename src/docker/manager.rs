@@ -107,9 +107,12 @@ impl BollardRuntime {
     fn connect(socket: &str) -> ArmorResult<Docker> {
         if std::path::Path::new(socket).exists() {
             info!("Connecting to container runtime socket: {}", socket);
-            Docker::connect_with_socket_defaults().map_err(|e| {
-                ArmorError::DockerConnectionFailed(format!("{}: {}", socket, e))
-            })
+            Docker::connect_with_socket(
+                socket,
+                120,
+                bollard::API_DEFAULT_VERSION,
+            )
+            .map_err(|e| ArmorError::DockerConnectionFailed(format!("{}: {}", socket, e)))
         } else {
             warn!("Socket not found: {} — trying default connection", socket);
             Docker::connect_with_local_defaults()
@@ -270,6 +273,12 @@ impl BollardRuntime {
         &self,
         config: &ArmorContainerConfig,
     ) -> ArmorResult<bollard::container::Config<String>> {
+        if !self.config.allowed_images.iter().any(|img| img == &config.image) {
+            return Err(ArmorError::ForbiddenMount(format!(
+                "Image not allowed"
+            )));
+        }
+
         let cmd = config.command.clone();
         let env = config.env.clone();
 
@@ -286,74 +295,61 @@ impl BollardRuntime {
                                 mount.mount_type
                             )));
                         }
-                        for pattern in &self.config.forbidden_mount_patterns {
-                            if mount.source.contains(pattern.as_str())
-                                || mount.target.contains(pattern.as_str())
-                            {
-                                warn!(
-                                    "Security policy rejected mount '{}:{}' — pattern '{}'",
-                                    mount.source, mount.target, pattern
-                                );
-                                return Err(ArmorError::ForbiddenMount(format!(
-                                    "{}:{} matches '{}'",
-                                    mount.source, mount.target, pattern
-                                )));
+                        let source_to_check = if let Ok(canonical) = std::fs::canonicalize(&mount.source) {
+                            canonical.to_string_lossy().to_lowercase()
+                        } else {
+                            mount.source.to_lowercase()
+                        };
+                        let target_lower = mount.target.to_lowercase();
+                        let all_patterns: Vec<&str> = vec![
+                            "docker.sock", "/var/run/docker", "/run/docker",
+                            "podman.sock", "/run/podman",
+                        ];
+                        for pattern in all_patterns {
+                            if source_to_check.contains(pattern) || target_lower.contains(pattern) {
+                                warn!("Security policy rejected mount '{}:{}'", mount.source, mount.target);
+                                return Err(ArmorError::ForbiddenMount("Mount blocked by security policy".into()));
                             }
                         }
                         let ro = mount.read_only.unwrap_or(false);
-                        binds.push(format!(
-                            "{}:{}{}",
-                            mount.source,
-                            mount.target,
-                            if ro { ":ro" } else { "" }
-                        ));
+                        binds.push(format!("{}:{}{}", mount.source, mount.target, if ro { ":ro" } else { "" }));
                     }
                     "tmpfs" => {
                         let opts = mount.tmpfs_options.clone().unwrap_or_default();
                         tmpfs.insert(mount.target.clone(), opts);
                     }
-                    _ => {}
+                    _ => {
+                        return Err(ArmorError::InvalidMountConfig(
+                            format!("Unsupported mount type: '{}'", mount.mount_type)
+                        ));
+                    }
                 }
             }
         }
 
-        let effective_network_mode = config
-            .network_mode
-            .clone()
-            .unwrap_or_else(|| "none".to_string());
-
-        let allowed = ["bridge", "host", "none"];
+        let effective_network_mode = config.network_mode.clone().unwrap_or_else(|| "none".into());
+        let allowed = ["bridge", "none"];
         if !allowed.contains(&effective_network_mode.as_str()) {
-            return Err(ArmorError::InvalidNetworkMode(effective_network_mode));
+            if effective_network_mode == "host" && self.config.allow_host_network {
+                warn!("Host network mode allowed via ALLOW_HOST_NETWORK=true");
+            } else {
+                return Err(ArmorError::InvalidNetworkMode(effective_network_mode));
+            }
         }
 
-        if effective_network_mode == "host" && !self.config.allow_host_network {
-            warn!(
-                "Security policy rejected host network for '{}'",
-                config.name
-            );
-            return Err(ArmorError::HostNetworkDenied);
-        }
+        let memory = config.memory_limit
+            .unwrap_or(self.config.container_memory_mb * 1024 * 1024)
+            .max(64 * 1024 * 1024);
+        let cpu_shares = config.cpu_shares
+            .unwrap_or(self.config.container_cpu_shares)
+            .clamp(2, 4096);
+        let pids_limit = config.pids_limit
+            .unwrap_or(self.config.container_pids_limit)
+            .clamp(10, 1000);
 
-        let memory = config
-            .memory_limit
-            .unwrap_or(self.config.container_memory_mb * 1024 * 1024);
-        let cpu_shares = config
-            .cpu_shares
-            .unwrap_or(self.config.container_cpu_shares);
-        let pids_limit = config
-            .pids_limit
-            .unwrap_or(self.config.container_pids_limit);
-
-        let mut security_opt: Vec<String> = Vec::new();
-        if config.no_new_privileges.unwrap_or(true) {
-            security_opt.push("no-new-privileges".into());
-        }
-
-        let cap_drop = config
-            .cap_drop
-            .clone()
-            .unwrap_or_else(|| vec!["ALL".into()]);
+        let cap_drop = vec!["ALL".to_string()];
+        let readonly_rootfs = true;
+        let security_opt: Vec<String> = vec!["no-new-privileges".into()];
 
         let host_config = HostConfig {
             binds: if binds.is_empty() { None } else { Some(binds) },
@@ -363,9 +359,9 @@ impl BollardRuntime {
             cpu_shares: Some(cpu_shares),
             pids_limit: Some(pids_limit),
             cap_drop: Some(cap_drop),
-            readonly_rootfs: Some(config.readonly_rootfs.unwrap_or(true)),
+            readonly_rootfs: Some(readonly_rootfs),
             auto_remove: config.auto_remove,
-            security_opt: if security_opt.is_empty() { None } else { Some(security_opt) },
+            security_opt: Some(security_opt),
             ..Default::default()
         };
 
@@ -373,7 +369,7 @@ impl BollardRuntime {
             image: Some(config.image.clone()),
             cmd,
             env,
-            user: config.user.clone(),
+            user: Some("opencode".into()),
             working_dir: config.working_dir.clone(),
             host_config: Some(host_config),
             ..Default::default()
