@@ -21,13 +21,15 @@ async fn main() -> Result<(), ArmorError> {
     let runtime: Arc<dyn ContainerRuntime> = Arc::new(BollardRuntime::auto_detect(config.clone())?);
     info!("Container runtime: {}", runtime.runtime_name());
 
-    let pool = sqlx::PgPool::connect(&config.database_url)
+    let _ = std::fs::create_dir_all("./data");
+
+    let pool = sqlx::SqlitePool::connect("sqlite://./data/agentic_armor.db?mode=rwc")
         .await
         .map_err(|e| ArmorError::Database(e.to_string()))?;
 
     let registry = Arc::new(TaskRegistry::new(pool));
     registry.migrate().await.map_err(|e| ArmorError::Database(e.to_string()))?;
-    info!("Database migrated");
+    info!("Database ready: {}", config.database_url);
 
     let lifecycle = Arc::new(TaskLifecycle::new(registry.clone()));
 

@@ -77,9 +77,21 @@ impl BollardRuntime {
                     .as_deref()
                     .unwrap_or("/var/run/docker.sock");
 
+                let docker_desktop_socket = format!(
+                    "{}/.docker/run/docker.sock",
+                    std::env::var("HOME").unwrap_or_default()
+                );
+
                 if std::path::Path::new(docker_socket).exists() {
                     info!("Docker socket found — using Docker runtime");
                     return Self::new_docker(config);
+                }
+
+                if std::path::Path::new(&docker_desktop_socket).exists() {
+                    info!("Docker Desktop socket found at {} — using Docker runtime", docker_desktop_socket);
+                    let mut new_config = (*config).clone();
+                    new_config.docker_socket = Some(docker_desktop_socket);
+                    return Self::new_docker(Arc::new(new_config));
                 }
 
                 let podman_socket = config.podman_socket.as_deref()

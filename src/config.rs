@@ -37,7 +37,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             database_url: env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgresql://localhost:5433/agentic_armor".into()),
+                .unwrap_or_else(|_| "sqlite:./data/agentic_armor.db".into()),
             docker_socket: env::var("DOCKER_SOCKET").ok(),
             container_memory_mb: env::var("CONTAINER_MEMORY_MB")
                 .ok()

@@ -77,7 +77,7 @@ async fn register_task_create(
 
                     let existing = reg.list(1000).await.unwrap_or_default();
                     let active = existing.iter().filter(|t| {
-                        matches!(t.status, crate::task::TaskStatus::Pending | crate::task::TaskStatus::Running)
+                        matches!(t.status.as_str(), "pending" | "running")
                     }).count();
                     if active >= 10 {
                         return Ok(CallToolResult::error(
