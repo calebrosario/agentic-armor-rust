@@ -32,7 +32,7 @@ PODMAN_SOCKET=/custom/path/podman.sock CONTAINER_RUNTIME=podman cargo run
 ### Starting Podman Socket
 
 ```bash
-# Rootless (non-root user)
+# Rootless (non-root user) — recommended for security
 systemctl --user start podman.socket
 systemctl --user enable podman.socket  # auto-start on boot
 
@@ -42,6 +42,38 @@ sudo systemctl start podman.socket
 # Verify
 curl --unix-socket /run/user/$UID/podman/podman.sock http://localhost/v5.0.0/libpod/info
 ```
+
+## Docker vs Podman: Security Comparison
+
+Podman is **recommended for production** due to its daemonless, rootless architecture. Both runtimes work identically through the unified `ContainerRuntime` trait.
+
+| Security Property | Docker | Podman Rootless |
+|--------------------|--------|-----------------|
+| Architecture | Root daemon (`dockerd`) — persistent attack target | No daemon — each container is a separate process |
+| Socket compromise | **Full root on host** — can mount host FS, create privileged containers | **User-scoped only** — cannot access root files, cannot escalate |
+| Container root maps to | Host root (UID 0) | Unprivileged host user (UID 100000+) via user namespaces |
+| Can read `~/.ssh/id_rsa`? | Yes (if socket compromised) | No (user-scoped) |
+| Can install malware? | Yes (root access) | No (no sudo) |
+| SELinux integration | Available but often unconfigured | Enabled by default on RHEL/Fedora |
+| Daemon process | Always running as root | No daemon |
+
+### The Docker Socket Attack Vector
+
+agentic-armor blocks mounting `docker.sock` via pattern matching + canonicalization. But defense-in-depth matters:
+
+```
+Docker (if socket compromised):
+  Agent → docker.sock → create privileged container → mount / → read everything
+
+Podman rootless (if socket compromised):
+  Agent → podman.sock → can only manage that user's containers → stuck at user level
+```
+
+### Recommendation
+
+- **Linux servers / production:** Use Podman (`CONTAINER_RUNTIME=podman`). Rootless socket eliminates the highest-severity escape vector.
+- **macOS / development:** Docker Desktop is fine — both run inside VMs so the security difference is smaller.
+- **CI / untrusted workloads:** Always Podman rootless.
 
 ## Configuration
 
