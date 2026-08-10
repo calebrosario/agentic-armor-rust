@@ -2,6 +2,16 @@
 
 > One binary. Zero dependencies. Hardened AI agent sandboxes via MCP. Docker + Podman.
 
+[![CI](https://github.com/calebrosario/agentic-armor-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/calebrosario/agentic-armor-rust/actions/workflows/ci.yml)
+[![Security Audit](https://img.shields.io/badge/security-cargo--audit-green)](https://github.com/calebrosario/agentic-armor-rust/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![Binary Size](https://img.shields.io/badge/binary-7.3MB-success.svg)](https://github.com/calebrosario/agentic-armor-rust/releases)
+[![Runtime](https://img.shields.io/badge/runtime-Docker%20%7C%20Podman-blue.svg)](https://github.com/calebrosario/agentic-armor-rust#container-runtime-support)
+[![MCP Clients](https://img.shields.io/badge/MCP%20clients-7-purple.svg)](https://github.com/calebrosario/agentic-armor-rust#platform-setup)
+[![Database](https://img.shields.io/badge/database-SQLite%20embedded-success.svg)](https://github.com/calebrosario/agentic-armor-rust#why-no-postgresql)
+[![GitHub stars](https://img.shields.io/github/stars/calebrosario/agentic-armor-rust?style=social)](https://github.com/calebrosario/agentic-armor-rust/stargazers)
+
 **Agentic Armor** gives AI agents (Claude Code, OpenCode, Cursor, Codex, Windsurf) the ability to run code inside hardened, isolated containers — without touching your host filesystem. One 7.3MB Rust binary. No Node.js, no PostgreSQL, no external services.
 
 ## Why Agentic Armor?
