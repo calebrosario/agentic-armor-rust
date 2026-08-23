@@ -65,10 +65,7 @@ impl Default for Config {
                 "/home/opencode/".into(),
                 "/workspace/".into(),
             ],
-            forbidden_mount_patterns: vec![
-                "docker.sock".into(),
-                "/var/run/docker".into(),
-            ],
+            forbidden_mount_patterns: vec!["docker.sock".into(), "/var/run/docker".into()],
         }
     }
 }

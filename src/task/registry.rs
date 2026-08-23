@@ -157,11 +157,7 @@ impl TaskRegistry {
         Ok(row.map(Into::into))
     }
 
-    pub async fn update_status(
-        &self,
-        id: &str,
-        status: TaskStatus,
-    ) -> Result<(), sqlx::Error> {
+    pub async fn update_status(&self, id: &str, status: TaskStatus) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE tasks SET status = $2, updated_at = datetime('now') WHERE id = $1")
             .bind(id)
             .bind(status.to_string())
@@ -170,11 +166,7 @@ impl TaskRegistry {
         Ok(())
     }
 
-    pub async fn set_container_id(
-        &self,
-        id: &str,
-        container_id: &str,
-    ) -> Result<(), sqlx::Error> {
+    pub async fn set_container_id(&self, id: &str, container_id: &str) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE tasks SET metadata = json_set(metadata, '$.containerId', $2), updated_at = datetime('now') WHERE id = $1")
             .bind(id)
             .bind(container_id)
@@ -184,16 +176,19 @@ impl TaskRegistry {
     }
 
     pub async fn get_container_id(&self, id: &str) -> Result<Option<String>, sqlx::Error> {
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT metadata FROM tasks WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row: Option<(String,)> = sqlx::query_as("SELECT metadata FROM tasks WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
 
         Ok(row.and_then(|(metadata_str,)| {
             serde_json::from_str::<serde_json::Value>(&metadata_str)
                 .ok()
-                .and_then(|v| v.get("containerId").and_then(|c| c.as_str()).map(String::from))
+                .and_then(|v| {
+                    v.get("containerId")
+                        .and_then(|c| c.as_str())
+                        .map(String::from)
+                })
         }))
     }
 
@@ -235,11 +230,7 @@ impl TaskRegistry {
         Ok(())
     }
 
-    pub async fn get_logs(
-        &self,
-        task_id: &str,
-        limit: i64,
-    ) -> Result<Vec<TaskEvent>, sqlx::Error> {
+    pub async fn get_logs(&self, task_id: &str, limit: i64) -> Result<Vec<TaskEvent>, sqlx::Error> {
         let rows = sqlx::query_as::<_, TaskEventRow>(
             "SELECT id, task_id, event_type, level, message, data, created_at FROM task_events WHERE task_id = $1 ORDER BY created_at DESC LIMIT $2",
         )

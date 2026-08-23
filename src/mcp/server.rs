@@ -1,5 +1,8 @@
 use crate::config::Config;
-use crate::docker::{is_pid_exhaustion_error, task_network_name, ArmorContainerConfig, ContainerRuntime, ExecRequest, Mount, NetworkConfig};
+use crate::docker::{
+    is_pid_exhaustion_error, task_network_name, ArmorContainerConfig, ContainerRuntime,
+    ExecRequest, Mount, NetworkConfig,
+};
 use crate::error::{ArmorError, ArmorResult};
 use crate::task::{TaskLifecycle, TaskRegistry};
 use mcp_sdk::{CallToolResult, McpServer, StdioTransport, ToolBuilder};
@@ -25,7 +28,9 @@ pub async fn start(
     register_task_logs(&server, &registry).await;
 
     info!("Agentic Armor MCP server starting (8 tools, stdio)");
-    StdioTransport::serve(server).await.map_err(|e| ArmorError::Mcp(e.to_string()))?;
+    StdioTransport::serve(server)
+        .await
+        .map_err(|e| ArmorError::Mcp(e.to_string()))?;
     Ok(())
 }
 
@@ -417,79 +422,105 @@ async fn register_task_download(
 async fn register_task_list(server: &Arc<McpServer>, registry: &Arc<TaskRegistry>) {
     let reg = registry.clone();
 
-    server.register_tool(
-        ToolBuilder::new("task_list")
-            .description("List all tasks")
-            .schema(json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "number" }
-                }
-            }))
-            .handler(move |args| {
-                let reg = reg.clone();
-                async move {
-                    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(100).clamp(1, 1000);
-                    let tasks = match reg.list(limit).await {
-                        Ok(t) => t,
-                        Err(e) => return Ok(CallToolResult::error(format!("Database error: {}", e))),
-                    };
+    server
+        .register_tool(
+            ToolBuilder::new("task_list")
+                .description("List all tasks")
+                .schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "number" }
+                    }
+                }))
+                .handler(move |args| {
+                    let reg = reg.clone();
+                    async move {
+                        let limit = args
+                            .get("limit")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(100)
+                            .clamp(1, 1000);
+                        let tasks = match reg.list(limit).await {
+                            Ok(t) => t,
+                            Err(e) => {
+                                return Ok(CallToolResult::error(format!("Database error: {}", e)))
+                            }
+                        };
 
-                    Ok(CallToolResult::text(json!({
-                        "tasks": tasks.iter().map(|t| json!({
-                            "id": t.id,
-                            "name": t.name,
-                            "status": format!("{:?}", t.status).to_lowercase(),
-                            "owner": t.owner,
-                            "createdAt": t.created_at
-                        })).collect::<Vec<_>>(),
-                        "count": tasks.len()
-                    }).to_string()))
-                }
-            }),
-    ).await;
+                        Ok(CallToolResult::text(
+                            json!({
+                                "tasks": tasks.iter().map(|t| json!({
+                                    "id": t.id,
+                                    "name": t.name,
+                                    "status": format!("{:?}", t.status).to_lowercase(),
+                                    "owner": t.owner,
+                                    "createdAt": t.created_at
+                                })).collect::<Vec<_>>(),
+                                "count": tasks.len()
+                            })
+                            .to_string(),
+                        ))
+                    }
+                }),
+        )
+        .await;
 }
 
-async fn register_task_stop(server: &Arc<McpServer>, runtime: &Arc<dyn ContainerRuntime>, lifecycle: &Arc<TaskLifecycle>) {
+async fn register_task_stop(
+    server: &Arc<McpServer>,
+    runtime: &Arc<dyn ContainerRuntime>,
+    lifecycle: &Arc<TaskLifecycle>,
+) {
     let rt = runtime.clone();
     let lc = lifecycle.clone();
 
-    server.register_tool(
-        ToolBuilder::new("task_stop")
-            .description("Stop a running task and cancel it")
-            .schema(json!({
-                "type": "object",
-                "properties": { "taskId": { "type": "string" } },
-                "required": ["taskId"]
-            }))
-            .handler(move |args| {
-                let rt = rt.clone();
-                let lc = lc.clone();
-                async move {
-                    let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
+    server
+        .register_tool(
+            ToolBuilder::new("task_stop")
+                .description("Stop a running task and cancel it")
+                .schema(json!({
+                    "type": "object",
+                    "properties": { "taskId": { "type": "string" } },
+                    "required": ["taskId"]
+                }))
+                .handler(move |args| {
+                    let rt = rt.clone();
+                    let lc = lc.clone();
+                    async move {
+                        let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
 
-                    if let Ok(container_id) = lc.get_container_id(task_id).await {
-                        if let Err(e) = rt.stop_container(&container_id, 10).await {
-                            warn!("Failed to stop container {}: {}", container_id, e);
+                        if let Ok(container_id) = lc.get_container_id(task_id).await {
+                            if let Err(e) = rt.stop_container(&container_id, 10).await {
+                                warn!("Failed to stop container {}: {}", container_id, e);
+                            }
                         }
+
+                        let task = match lc.cancel_task(task_id).await {
+                            Ok(t) => t,
+                            Err(e) => {
+                                return Ok(CallToolResult::error(format!("Cancel failed: {}", e)))
+                            }
+                        };
+
+                        Ok(CallToolResult::text(
+                            json!({
+                                "success": true,
+                                "taskId": task.id,
+                                "status": "cancelled"
+                            })
+                            .to_string(),
+                        ))
                     }
-
-                    let task = match lc.cancel_task(task_id).await {
-                        Ok(t) => t,
-                        Err(e) => return Ok(CallToolResult::error(format!("Cancel failed: {}", e))),
-                    };
-
-                    Ok(CallToolResult::text(json!({
-                        "success": true,
-                        "taskId": task.id,
-                        "status": "cancelled"
-                    }).to_string()))
-                }
-            }),
-    ).await;
+                }),
+        )
+        .await;
 }
 
-async fn register_task_delete(server: &Arc<McpServer>, runtime: &Arc<dyn ContainerRuntime>, lifecycle: &Arc<TaskLifecycle>) {
+async fn register_task_delete(
+    server: &Arc<McpServer>,
+    runtime: &Arc<dyn ContainerRuntime>,
+    lifecycle: &Arc<TaskLifecycle>,
+) {
     let rt = runtime.clone();
     let lc = lifecycle.clone();
 
@@ -545,36 +576,47 @@ async fn register_task_delete(server: &Arc<McpServer>, runtime: &Arc<dyn Contain
 async fn register_task_logs(server: &Arc<McpServer>, registry: &Arc<TaskRegistry>) {
     let reg = registry.clone();
 
-    server.register_tool(
-        ToolBuilder::new("task_logs")
-            .description("Retrieve execution logs for a task")
-            .schema(json!({
-                "type": "object",
-                "properties": {
-                    "taskId": { "type": "string" },
-                    "limit": { "type": "number" }
-                },
-                "required": ["taskId"]
-            }))
-            .handler(move |args| {
-                let reg = reg.clone();
-                async move {
-                    let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
-                    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(100).clamp(1, 1000);
+    server
+        .register_tool(
+            ToolBuilder::new("task_logs")
+                .description("Retrieve execution logs for a task")
+                .schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "taskId": { "type": "string" },
+                        "limit": { "type": "number" }
+                    },
+                    "required": ["taskId"]
+                }))
+                .handler(move |args| {
+                    let reg = reg.clone();
+                    async move {
+                        let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
+                        let limit = args
+                            .get("limit")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(100)
+                            .clamp(1, 1000);
 
-                    let logs = match reg.get_logs(task_id, limit).await {
-                        Ok(l) => l,
-                        Err(e) => return Ok(CallToolResult::error(format!("Database error: {}", e))),
-                    };
+                        let logs = match reg.get_logs(task_id, limit).await {
+                            Ok(l) => l,
+                            Err(e) => {
+                                return Ok(CallToolResult::error(format!("Database error: {}", e)))
+                            }
+                        };
 
-                    Ok(CallToolResult::text(json!({
-                        "taskId": task_id,
-                        "count": logs.len(),
-                        "logs": logs
-                    }).to_string()))
-                }
-            }),
-    ).await;
+                        Ok(CallToolResult::text(
+                            json!({
+                                "taskId": task_id,
+                                "count": logs.len(),
+                                "logs": logs
+                            })
+                            .to_string(),
+                        ))
+                    }
+                }),
+        )
+        .await;
 }
 
 async fn rollback_task_create(
@@ -586,12 +628,18 @@ async fn rollback_task_create(
 ) {
     if let Some(cid) = container_id {
         if let Err(e) = rt.destroy_container(cid).await {
-            warn!("Rollback: container destroy failed for {}: {} — container may remain on host", cid, e);
+            warn!(
+                "Rollback: container destroy failed for {}: {} — container may remain on host",
+                cid, e
+            );
         }
     }
     if let Some(net) = network_name {
         if let Err(e) = rt.remove_network(net).await {
-            warn!("Rollback: network removal failed for {}: {} — orphaned network, remove manually", net, e);
+            warn!(
+                "Rollback: network removal failed for {}: {} — orphaned network, remove manually",
+                net, e
+            );
         }
     }
     if let Err(e) = lc.delete_task(task_id).await {
@@ -605,9 +653,27 @@ pub fn task_tmpfs_options(size_mb: usize) -> String {
 
 pub fn default_task_mounts() -> Vec<Mount> {
     vec![
-        Mount { source: "".into(), target: "/tmp".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some(task_tmpfs_options(64)) },
-        Mount { source: "".into(), target: "/home/opencode".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some(task_tmpfs_options(64)) },
-        Mount { source: "".into(), target: "/workspace".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some(task_tmpfs_options(256)) },
+        Mount {
+            source: "".into(),
+            target: "/tmp".into(),
+            mount_type: "tmpfs".into(),
+            read_only: None,
+            tmpfs_options: Some(task_tmpfs_options(64)),
+        },
+        Mount {
+            source: "".into(),
+            target: "/home/opencode".into(),
+            mount_type: "tmpfs".into(),
+            read_only: None,
+            tmpfs_options: Some(task_tmpfs_options(64)),
+        },
+        Mount {
+            source: "".into(),
+            target: "/workspace".into(),
+            mount_type: "tmpfs".into(),
+            read_only: None,
+            tmpfs_options: Some(task_tmpfs_options(256)),
+        },
     ]
 }
 
@@ -622,18 +688,30 @@ pub fn validate_path(path: &str, config: &Config) -> Result<(), String> {
     if path.contains("..") {
         return Err("Path traversal (..) not allowed".into());
     }
-    if !path.chars().all(|c| c.is_ascii_alphanumeric() || c == '/' || c == '.' || c == '_' || c == '@' || c == '-') {
+    if !path.chars().all(|c| {
+        c.is_ascii_alphanumeric() || c == '/' || c == '.' || c == '_' || c == '@' || c == '-'
+    }) {
         return Err("Path contains invalid characters".into());
     }
-    if !config.allowed_path_prefixes.iter().any(|prefix| path.starts_with(prefix.as_str())) {
-        return Err(format!("Path must be under one of: {:?}", config.allowed_path_prefixes));
+    if !config
+        .allowed_path_prefixes
+        .iter()
+        .any(|prefix| path.starts_with(prefix.as_str()))
+    {
+        return Err(format!(
+            "Path must be under one of: {:?}",
+            config.allowed_path_prefixes
+        ));
     }
     Ok(())
 }
 
 async fn audit_event(reg: &TaskRegistry, task_id: &str, event_type: &str, message: &str) {
     if let Err(e) = reg.add_event(task_id, event_type, message).await {
-        warn!("AUDIT WRITE FAILED for task {} ({}): {} — audit trail is incomplete", task_id, event_type, e);
+        warn!(
+            "AUDIT WRITE FAILED for task {} ({}): {} — audit trail is incomplete",
+            task_id, event_type, e
+        );
     }
 }
 
@@ -699,11 +777,14 @@ async fn resolve_path_in_container(
         )
     };
     let result = rt
-        .exec_in_container(container_id, &ExecRequest {
-            command: vec!["sh".into(), "-c".into(), script],
-            timeout_ms: Some(10_000),
-            ..Default::default()
-        })
+        .exec_in_container(
+            container_id,
+            &ExecRequest {
+                command: vec!["sh".into(), "-c".into(), script],
+                timeout_ms: Some(10_000),
+                ..Default::default()
+            },
+        )
         .await
         .map_err(|e| format!("Path resolution failed: {}", e))?;
     if result.exit_code != 0 {

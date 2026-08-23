@@ -17,7 +17,9 @@ fn test_container_config_builder_pattern() {
         name: "test".into(),
         image: "alpine:latest".into(),
         command: Some(vec!["sleep".into(), "10".into()]),
-        network: NetworkConfig::Bridge { network: "armor-t1".into() },
+        network: NetworkConfig::Bridge {
+            network: "armor-t1".into(),
+        },
         memory_limit: Some(512 * 1024 * 1024),
         cpu_shares: Some(1024),
         pids_limit: Some(100),
@@ -31,7 +33,9 @@ fn test_container_config_builder_pattern() {
     assert_eq!(config.command.as_ref().unwrap().len(), 2);
     assert_eq!(
         config.network,
-        NetworkConfig::Bridge { network: "armor-t1".into() }
+        NetworkConfig::Bridge {
+            network: "armor-t1".into()
+        }
     );
 }
 

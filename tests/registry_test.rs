@@ -72,14 +72,22 @@ async fn table_ddl(pool: &sqlx::SqlitePool, table: &str) -> String {
 async fn fresh_migrate_creates_append_only_events() {
     let (_reg, pool) = fresh_registry_with_pool().await;
     let ddl = table_ddl(&pool, "task_events").await;
-    assert!(!ddl.contains("CASCADE"), "fresh schema must not cascade: {}", ddl);
+    assert!(
+        !ddl.contains("CASCADE"),
+        "fresh schema must not cascade: {}",
+        ddl
+    );
 }
 
 #[tokio::test]
 async fn legacy_migration_preserves_rows_and_removes_cascade() {
     let (reg, pool) = legacy_registry_with_row().await;
     let ddl = table_ddl(&pool, "task_events").await;
-    assert!(!ddl.contains("CASCADE"), "legacy CASCADE must be removed, got: {}", ddl);
+    assert!(
+        !ddl.contains("CASCADE"),
+        "legacy CASCADE must be removed, got: {}",
+        ddl
+    );
 
     let events = reg.get_logs("legacy-1", 100).await.expect("logs");
     assert_eq!(events.len(), 1, "legacy event row must survive migration");
@@ -98,22 +106,36 @@ async fn legacy_migration_is_idempotent() {
 async fn events_survive_task_deletion() {
     let (reg, _pool) = fresh_registry_with_pool().await;
     reg.create("t1", "task", None).await.expect("create");
-    reg.add_event("t1", "exec_logged", "exec exit=0: echo hi").await.expect("event");
+    reg.add_event("t1", "exec_logged", "exec exit=0: echo hi")
+        .await
+        .expect("event");
 
     let lifecycle = TaskLifecycle::new(std::sync::Arc::new(reg.clone()));
     lifecycle.delete_task("t1").await.expect("delete");
 
     let events = reg.get_logs("t1", 100).await.expect("logs");
-    assert!(events.iter().any(|e| e.event_type == "exec_logged"), "exec audit must survive deletion");
-    assert!(events.iter().any(|e| e.event_type == "task_deleted"), "terminal event recorded");
+    assert!(
+        events.iter().any(|e| e.event_type == "exec_logged"),
+        "exec audit must survive deletion"
+    );
+    assert!(
+        events.iter().any(|e| e.event_type == "task_deleted"),
+        "terminal event recorded"
+    );
 }
 
 #[tokio::test]
 async fn delete_missing_task_is_ok_and_writes_no_phantom_event() {
     let (reg, _pool) = fresh_registry_with_pool().await;
     let lifecycle = TaskLifecycle::new(std::sync::Arc::new(reg.clone()));
-    lifecycle.delete_task("never-existed").await.expect("delete of missing task must be Ok");
+    lifecycle
+        .delete_task("never-existed")
+        .await
+        .expect("delete of missing task must be Ok");
 
     let events = reg.get_logs("never-existed", 100).await.expect("logs");
-    assert!(events.is_empty(), "no phantom task_deleted event for unknown tasks");
+    assert!(
+        events.is_empty(),
+        "no phantom task_deleted event for unknown tasks"
+    );
 }

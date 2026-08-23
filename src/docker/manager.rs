@@ -1,6 +1,6 @@
 use crate::config::Config;
-use crate::error::{ArmorError, ArmorResult};
 use crate::docker::types::*;
+use crate::error::{ArmorError, ArmorResult};
 use async_trait::async_trait;
 use bollard::container::*;
 use bollard::exec::{CreateExecOptions, StartExecResults};
@@ -81,7 +81,10 @@ pub struct BollardRuntime {
 impl BollardRuntime {
     pub fn new_docker(config: Arc<Config>) -> ArmorResult<Self> {
         let docker = Self::connect(
-            config.docker_socket.as_deref().unwrap_or("/var/run/docker.sock"),
+            config
+                .docker_socket
+                .as_deref()
+                .unwrap_or("/var/run/docker.sock"),
         )?;
         Ok(BollardRuntime {
             docker,
@@ -91,15 +94,14 @@ impl BollardRuntime {
     }
 
     pub fn new_podman(config: Arc<Config>) -> ArmorResult<Self> {
-        let socket = std::env::var("PODMAN_SOCKET")
-            .unwrap_or_else(|_| {
-                let uid = unsafe { libc::getuid() };
-                if uid == 0 {
-                    "/run/podman/podman.sock".into()
-                } else {
-                    format!("/run/user/{}/podman/podman.sock", uid)
-                }
-            });
+        let socket = std::env::var("PODMAN_SOCKET").unwrap_or_else(|_| {
+            let uid = unsafe { libc::getuid() };
+            if uid == 0 {
+                "/run/podman/podman.sock".into()
+            } else {
+                format!("/run/user/{}/podman/podman.sock", uid)
+            }
+        });
         let docker = Self::connect(&socket)?;
         Ok(BollardRuntime {
             docker,
@@ -135,13 +137,18 @@ impl BollardRuntime {
                 }
 
                 if std::path::Path::new(&docker_desktop_socket).exists() {
-                    info!("Docker Desktop socket found at {} — using Docker runtime", docker_desktop_socket);
+                    info!(
+                        "Docker Desktop socket found at {} — using Docker runtime",
+                        docker_desktop_socket
+                    );
                     let mut new_config = (*config).clone();
                     new_config.docker_socket = Some(docker_desktop_socket);
                     return Self::new_docker(Arc::new(new_config));
                 }
 
-                let podman_socket = config.podman_socket.as_deref()
+                let podman_socket = config
+                    .podman_socket
+                    .as_deref()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| {
                         let uid = unsafe { libc::getuid() };
@@ -153,7 +160,10 @@ impl BollardRuntime {
                     });
 
                 if std::path::Path::new(&podman_socket).exists() {
-                    info!("Podman socket found at {} — using Podman runtime", podman_socket);
+                    info!(
+                        "Podman socket found at {} — using Podman runtime",
+                        podman_socket
+                    );
                     return Self::new_podman(config);
                 }
 
@@ -166,12 +176,8 @@ impl BollardRuntime {
     fn connect(socket: &str) -> ArmorResult<Docker> {
         if std::path::Path::new(socket).exists() {
             info!("Connecting to container runtime socket: {}", socket);
-            Docker::connect_with_socket(
-                socket,
-                120,
-                bollard::API_DEFAULT_VERSION,
-            )
-            .map_err(|e| ArmorError::DockerConnectionFailed(format!("{}: {}", socket, e)))
+            Docker::connect_with_socket(socket, 120, bollard::API_DEFAULT_VERSION)
+                .map_err(|e| ArmorError::DockerConnectionFailed(format!("{}: {}", socket, e)))
         } else {
             warn!("Socket not found: {} — trying default connection", socket);
             Docker::connect_with_local_defaults()
@@ -220,9 +226,7 @@ impl ContainerRuntime for BollardRuntime {
     }
 
     async fn start_container(&self, id: &str) -> ArmorResult<()> {
-        self.docker
-            .start_container::<&str>(id, None)
-            .await?;
+        self.docker.start_container::<&str>(id, None).await?;
         Ok(())
     }
 
@@ -253,11 +257,7 @@ impl ContainerRuntime for BollardRuntime {
         Ok(())
     }
 
-    async fn exec_in_container(
-        &self,
-        id: &str,
-        request: &ExecRequest,
-    ) -> ArmorResult<ExecResult> {
+    async fn exec_in_container(&self, id: &str, request: &ExecRequest) -> ArmorResult<ExecResult> {
         let start = Instant::now();
 
         let exec_config = CreateExecOptions {
@@ -315,7 +315,9 @@ impl ContainerRuntime for BollardRuntime {
         let exec_inspect = self.docker.inspect_exec(&exec_id).await?;
         let exit_code = exec_inspect.exit_code.unwrap_or(-1);
         if exit_code < 0 && exec_notes.is_empty() {
-            exec_notes.push("[agentic-armor] exec produced no exit code (killed or still running)".into());
+            exec_notes.push(
+                "[agentic-armor] exec produced no exit code (killed or still running)".into(),
+            );
         }
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -334,7 +336,12 @@ impl ContainerRuntime for BollardRuntime {
     }
 
     async fn create_network(&self, name: &str) -> ArmorResult<()> {
-        if self.docker.inspect_network::<String>(name, None).await.is_ok() {
+        if self
+            .docker
+            .inspect_network::<String>(name, None)
+            .await
+            .is_ok()
+        {
             return Ok(());
         }
         self.docker
@@ -358,10 +365,13 @@ impl BollardRuntime {
         &self,
         config: &ArmorContainerConfig,
     ) -> ArmorResult<bollard::container::Config<String>> {
-        if !self.config.allowed_images.iter().any(|img| img == &config.image) {
-            return Err(ArmorError::ForbiddenMount(
-                "Image not allowed".to_string(),
-            ));
+        if !self
+            .config
+            .allowed_images
+            .iter()
+            .any(|img| img == &config.image)
+        {
+            return Err(ArmorError::ForbiddenMount("Image not allowed".to_string()));
         }
 
         let cmd = config.command.clone();
@@ -380,33 +390,48 @@ impl BollardRuntime {
                                 mount.mount_type
                             )));
                         }
-                        let source_to_check = if let Ok(canonical) = std::fs::canonicalize(&mount.source) {
-                            canonical.to_string_lossy().to_lowercase()
-                        } else {
-                            mount.source.to_lowercase()
-                        };
+                        let source_to_check =
+                            if let Ok(canonical) = std::fs::canonicalize(&mount.source) {
+                                canonical.to_string_lossy().to_lowercase()
+                            } else {
+                                mount.source.to_lowercase()
+                            };
                         let target_lower = mount.target.to_lowercase();
                         let all_patterns: Vec<&str> = vec![
-                            "docker.sock", "/var/run/docker", "/run/docker",
-                            "podman.sock", "/run/podman",
+                            "docker.sock",
+                            "/var/run/docker",
+                            "/run/docker",
+                            "podman.sock",
+                            "/run/podman",
                         ];
                         for pattern in all_patterns {
                             if source_to_check.contains(pattern) || target_lower.contains(pattern) {
-                                warn!("Security policy rejected mount '{}:{}'", mount.source, mount.target);
-                                return Err(ArmorError::ForbiddenMount("Mount blocked by security policy".into()));
+                                warn!(
+                                    "Security policy rejected mount '{}:{}'",
+                                    mount.source, mount.target
+                                );
+                                return Err(ArmorError::ForbiddenMount(
+                                    "Mount blocked by security policy".into(),
+                                ));
                             }
                         }
                         let ro = mount.read_only.unwrap_or(false);
-                        binds.push(format!("{}:{}{}", mount.source, mount.target, if ro { ":ro" } else { "" }));
+                        binds.push(format!(
+                            "{}:{}{}",
+                            mount.source,
+                            mount.target,
+                            if ro { ":ro" } else { "" }
+                        ));
                     }
                     "tmpfs" => {
                         let opts = mount.tmpfs_options.clone().unwrap_or_default();
                         tmpfs.insert(mount.target.clone(), opts);
                     }
                     _ => {
-                        return Err(ArmorError::InvalidMountConfig(
-                            format!("Unsupported mount type: '{}'", mount.mount_type)
-                        ));
+                        return Err(ArmorError::InvalidMountConfig(format!(
+                            "Unsupported mount type: '{}'",
+                            mount.mount_type
+                        )));
                     }
                 }
             }
@@ -414,13 +439,16 @@ impl BollardRuntime {
 
         let network_mode = docker_network_mode(&config.network, self.config.allow_host_network)?;
 
-        let memory = config.memory_limit
+        let memory = config
+            .memory_limit
             .unwrap_or(self.config.container_memory_mb * 1024 * 1024)
             .max(64 * 1024 * 1024);
-        let cpu_shares = config.cpu_shares
+        let cpu_shares = config
+            .cpu_shares
             .unwrap_or(self.config.container_cpu_shares)
             .clamp(2, 4096);
-        let pids_limit = config.pids_limit
+        let pids_limit = config
+            .pids_limit
             .unwrap_or(self.config.container_pids_limit)
             .clamp(10, 1000);
 
