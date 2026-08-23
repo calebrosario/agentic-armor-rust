@@ -1,4 +1,4 @@
-use agentic_armor::{ArmorError, RuntimeChoice};
+use agentic_armor::ArmorError;
 
 #[test]
 fn test_error_codes() {

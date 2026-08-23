@@ -109,7 +109,9 @@ async fn register_task_create(
                     if let Some(net) = &per_task_network {
                         if let Err(e) = rt.create_network(net).await {
                             error!("Network creation failed for task {}: {}", task_id, e);
-                            let _ = lc.delete_task(task_id).await;
+                            if let Err(rb) = lc.delete_task(task_id).await {
+                                error!("Rollback failed: task {} row not removed ({}) — it now counts toward the concurrency cap; delete it manually", task_id, rb);
+                            }
                             return Ok(CallToolResult::error(format!("Network creation failed: {}", e)));
                         }
                     }
@@ -135,41 +137,57 @@ async fn register_task_create(
                         Ok(id) => {
                             if network_mode == "bridge" {
                                 warn!("Task {} created with network access (isolated bridge {})", task_id, task_network_name(task_id));
-                                reg.add_event(task_id, "network_enabled", "Container created with isolated per-task bridge networking").await.ok();
+                                audit_event(&reg, task_id, "network_enabled", "Container created with isolated per-task bridge networking").await;
                             }
                             id
                         }
                         Err(e) => {
                             error!("Container creation failed for task {}: {}", task_id, e);
                             if let Some(net) = &per_task_network {
-                                let _ = rt.remove_network(net).await;
+                                if let Err(rb) = rt.remove_network(net).await {
+                                    warn!("Rollback: network removal failed for {}: {} — orphaned network, remove manually", net, rb);
+                                }
                             }
-                            let _ = lc.delete_task(task_id).await;
+                            if let Err(rb) = lc.delete_task(task_id).await {
+                                error!("Rollback failed: task {} row not removed ({}) — it now counts toward the concurrency cap; delete it manually", task_id, rb);
+                            }
                             return Ok(CallToolResult::error(format!("Container creation failed: {}", e)));
                         }
                     };
 
                     if let Err(e) = rt.start_container(&container_id).await {
                         error!("Container start failed for {}: {}", container_id, e);
-                        let _ = rt.destroy_container(&container_id).await;
-                        if let Some(net) = &per_task_network {
-                            let _ = rt.remove_network(net).await;
+                        if let Err(rb) = rt.destroy_container(&container_id).await {
+                            warn!("Rollback: container destroy failed for {}: {} — container may remain on host", container_id, rb);
                         }
-                        let _ = lc.delete_task(task_id).await;
+                        if let Some(net) = &per_task_network {
+                            if let Err(rb) = rt.remove_network(net).await {
+                                warn!("Rollback: network removal failed for {}: {} — orphaned network, remove manually", net, rb);
+                            }
+                        }
+                        if let Err(rb) = lc.delete_task(task_id).await {
+                            error!("Rollback failed: task {} row not removed ({}) — it now counts toward the concurrency cap; delete it manually", task_id, rb);
+                        }
                         return Ok(CallToolResult::error(format!("Container start failed: {}", e)));
                     }
 
                     if let Err(e) = reg.set_container_id(task_id, &container_id).await {
                         error!("Failed to persist containerId: {}", e);
-                        let _ = rt.destroy_container(&container_id).await;
-                        if let Some(net) = &per_task_network {
-                            let _ = rt.remove_network(net).await;
+                        if let Err(rb) = rt.destroy_container(&container_id).await {
+                            warn!("Rollback: container destroy failed for {}: {} — container may remain on host", container_id, rb);
                         }
-                        let _ = lc.delete_task(task_id).await;
+                        if let Some(net) = &per_task_network {
+                            if let Err(rb) = rt.remove_network(net).await {
+                                warn!("Rollback: network removal failed for {}: {} — orphaned network, remove manually", net, rb);
+                            }
+                        }
+                        if let Err(rb) = lc.delete_task(task_id).await {
+                            error!("Rollback failed: task {} row not removed ({}) — it now counts toward the concurrency cap; delete it manually", task_id, rb);
+                        }
                         return Ok(CallToolResult::error(format!("Failed to associate container: {}", e)));
                     }
 
-                    reg.add_event(task_id, "container_created", &format!("Container {} started", container_id)).await.ok();
+                    audit_event(&reg, task_id, "container_created", &format!("Container {} started", container_id)).await;
 
                     Ok(CallToolResult::text(json!({
                         "success": true,
@@ -217,15 +235,12 @@ async fn register_task_exec(
                         .unwrap_or_default();
                     let timeout_ms = args.get("timeout").and_then(|v| v.as_u64());
 
-                    let audit_cmd: String = {
-                        let joined = command.join(" ");
-                        joined.chars().take(512).collect()
-                    };
+                    let audit_cmd = audit_command(&command);
 
                     let container_id = match lc.get_container_id(task_id).await {
                         Ok(id) => id,
                         Err(e) => {
-                            reg.add_event(task_id, "exec_logged", &format!("exec rejected (task not found): {}", audit_cmd)).await.ok();
+                            audit_event(&reg, task_id, "exec_logged", &format!("exec rejected (task not found): {}", audit_cmd)).await;
                             return Ok(CallToolResult::error(format!("Cannot find container: {}", e)));
                         }
                     };
@@ -242,12 +257,12 @@ async fn register_task_exec(
                             } else {
                                 ""
                             };
-                            reg.add_event(task_id, "exec_logged", &format!("exec error ({}): {}", e, audit_cmd)).await.ok();
+                            audit_event(&reg, task_id, "exec_logged", &format!("exec error ({}): {}", e, audit_cmd)).await;
                             return Ok(CallToolResult::error(format!("Exec failed: {}{}", e, hint)));
                         }
                     };
 
-                    reg.add_event(task_id, "exec_logged", &format!("exec exit={} durMs={}: {}", result.exit_code, result.duration_ms, audit_cmd)).await.ok();
+                    audit_event(&reg, task_id, "exec_logged", &format!("exec exit={} durMs={}: {}", result.exit_code, result.duration_ms, audit_cmd)).await;
 
                     let fork_hint = if result.stderr.contains("can't fork")
                         || result.stderr.contains("Cannot fork")
@@ -258,15 +273,17 @@ async fn register_task_exec(
                         ""
                     };
 
+                    let stderr = if fork_hint.is_empty() {
+                        result.stderr
+                    } else {
+                        format!("{}{}", result.stderr, fork_hint)
+                    };
+
                     Ok(CallToolResult::text(json!({
                         "success": result.exit_code == 0,
                         "exitCode": result.exit_code,
                         "stdout": result.stdout,
-                        "stderr": if fork_hint.is_empty() {
-                            result.stderr.clone()
-                        } else {
-                            format!("{}{}", result.stderr, fork_hint)
-                        },
+                        "stderr": stderr,
                         "durationMs": result.duration_ms
                     }).to_string()))
                 }
@@ -399,7 +416,7 @@ async fn register_task_download(
 
                     let max_bytes = 10 * 1024 * 1024;
                     let result = match rt.exec_in_container(&container_id, &ExecRequest {
-                        command: vec!["sh".into(), "-c".into(), format!("head -c {} '{}'", max_bytes, resolved)],
+                        command: vec!["sh".into(), "-c".into(), format!("head -c {} {}", max_bytes, shell_quote(&resolved))],
                         timeout_ms: Some(30_000),
                         ..Default::default()
                     }).await {
@@ -441,7 +458,7 @@ async fn register_task_list(server: &Arc<McpServer>, registry: &Arc<TaskRegistry
             .handler(move |args| {
                 let reg = reg.clone();
                 async move {
-                    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(100).min(1000).max(1);
+                    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(100).clamp(1, 1000);
                     let tasks = match reg.list(limit).await {
                         Ok(t) => t,
                         Err(e) => return Ok(CallToolResult::error(format!("Database error: {}", e))),
@@ -519,14 +536,12 @@ async fn register_task_delete(server: &Arc<McpServer>, runtime: &Arc<dyn Contain
                 async move {
                     let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
 
-                    let had_container = lc.get_container_id(task_id).await.is_ok();
+                    let container_id = lc.get_container_id(task_id).await.ok();
                     let had_task = lc.get_task(task_id).await.is_ok();
 
-                    if had_container {
-                        if let Ok(container_id) = lc.get_container_id(task_id).await {
-                            if let Err(e) = rt.destroy_container(&container_id).await {
-                                warn!("Failed to destroy container {}: {}", container_id, e);
-                            }
+                    if let Some(container_id) = container_id.as_deref() {
+                        if let Err(e) = rt.destroy_container(container_id).await {
+                            warn!("Failed to destroy container {} for task {}: {} — container may still be running on the host", container_id, task_id, e);
                         }
                         if let Err(e) = rt.remove_network(&task_network_name(task_id)).await {
                             if !e.to_string().to_lowercase().contains("no such network") {
@@ -567,7 +582,7 @@ async fn register_task_logs(server: &Arc<McpServer>, registry: &Arc<TaskRegistry
                 let reg = reg.clone();
                 async move {
                     let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
-                    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(100).min(1000).max(1);
+                    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(100).clamp(1, 1000);
 
                     let logs = match reg.get_logs(task_id, limit).await {
                         Ok(l) => l,
@@ -612,9 +627,15 @@ pub fn validate_path(path: &str, config: &Config) -> Result<(), String> {
     Ok(())
 }
 
+async fn audit_event(reg: &TaskRegistry, task_id: &str, event_type: &str, message: &str) {
+    if let Err(e) = reg.add_event(task_id, event_type, message).await {
+        warn!("AUDIT WRITE FAILED for task {} ({}): {} — audit trail is incomplete", task_id, event_type, e);
+    }
+}
+
 pub fn base64_encode(input: &str) -> String {
     use std::fmt::Write;
-    let mut result = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(input.len().div_ceil(3) * 4);
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let bytes = input.as_bytes();
     for chunk in bytes.chunks(3) {
@@ -638,6 +659,14 @@ pub fn base64_encode(input: &str) -> String {
     result
 }
 
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+pub fn audit_command(command: &[String]) -> String {
+    command.join(" ").chars().take(512).collect()
+}
+
 async fn resolve_path_in_container(
     rt: &Arc<dyn ContainerRuntime>,
     container_id: &str,
@@ -645,11 +674,12 @@ async fn resolve_path_in_container(
     follow_final: bool,
 ) -> Result<String, String> {
     let script = if follow_final {
-        format!("readlink -f '{}'", path)
+        format!("readlink -f {}", shell_quote(path))
     } else {
         format!(
-            "p=\"$(dirname '{}')\"; tail=''; while [ \"$p\" != / ] && [ ! -e \"$p\" ]; do tail=\"/$(basename \"$p\")$tail\"; p=$(dirname \"$p\"); done; echo \"$(readlink -f \"$p\")$tail/$(basename '{}')\"",
-            path, path
+            "p=\"$(dirname {})\"; tail=''; while [ \"$p\" != / ] && [ ! -e \"$p\" ]; do tail=\"/$(basename \"$p\")$tail\"; p=$(dirname \"$p\"); done; echo \"$(readlink -f \"$p\")$tail/$(basename {})\"",
+            shell_quote(path),
+            shell_quote(path)
         )
     };
     let result = rt
@@ -669,12 +699,13 @@ async fn resolve_path_in_container(
 const UPLOAD_CHUNK_BYTES: usize = 48 * 1024;
 
 pub fn upload_chunk_commands(resolved_path: &str, b64: &str) -> Vec<String> {
+    let quoted = shell_quote(resolved_path);
     let symlink_guard = format!(
-        "[ ! -L '{}' ] || {{ echo 'refusing to write through symlink' >&2; exit 1; }}",
-        resolved_path
+        "[ ! -L {} ] || {{ echo 'refusing to write through symlink' >&2; exit 1; }}",
+        quoted
     );
     if b64.is_empty() {
-        return vec![format!("{} && : > '{}'", symlink_guard, resolved_path)];
+        return vec![format!("{} && : > {}", symlink_guard, quoted)];
     }
     b64.as_bytes()
         .chunks(UPLOAD_CHUNK_BYTES)
@@ -682,13 +713,13 @@ pub fn upload_chunk_commands(resolved_path: &str, b64: &str) -> Vec<String> {
         .map(|(i, chunk)| {
             let redirect = if i == 0 { ">" } else { ">>" };
             format!(
-                "{} && mkdir -p \"$(dirname '{}')\" && printf %s '{}' | base64 -d {} '{}' || {{ rm -f '{}'; exit 1; }}",
+                "{} && mkdir -p \"$(dirname {})\" && printf %s '{}' | base64 -d {} {} || {{ rm -f {}; exit 1; }}",
                 if i == 0 { &symlink_guard } else { "true" },
-                resolved_path,
+                quoted,
                 std::str::from_utf8(chunk).unwrap_or(""),
                 redirect,
-                resolved_path,
-                resolved_path
+                quoted,
+                quoted
             )
         })
         .collect()

@@ -148,11 +148,11 @@ fn upload_chunks_stay_under_argmax() {
 }
 
 #[test]
-fn upload_chunk_boundaries_decode_independently() {
+fn upload_chunk_boundaries_are_base64_aligned() {
     let input = "A".repeat(200 * 1024);
     let b64 = base64_encode(&input);
     for chunk in b64.as_bytes().chunks(48 * 1024) {
-        assert_eq!(chunk.len() % 4, 0, "every non-final chunk must be base64-aligned");
+        assert_eq!(chunk.len() % 4, 0, "every chunk must be independently decodable base64");
     }
 }
 
@@ -203,4 +203,96 @@ fn pid_exhaustion_signatures_are_recognized() {
     assert!(is_pid_exhaustion_error(&ArmorError::Docker("write /proc/self/oom: No space left on device".into())));
     assert!(!is_pid_exhaustion_error(&ArmorError::Docker("image not found".into())));
     assert!(!is_pid_exhaustion_error(&ArmorError::TaskNotFound("x".into())));
+}
+
+#[test]
+fn shell_quote_escapes_single_quotes() {
+    use agentic_armor::mcp::server::shell_quote;
+    assert_eq!(shell_quote("/tmp/plain.txt"), "'/tmp/plain.txt'");
+    assert_eq!(shell_quote("/tmp/it's.txt"), "'/tmp/it'\\''s.txt'");
+    assert_eq!(shell_quote(""), "''");
+}
+
+#[test]
+fn shell_quoted_upload_commands_stay_safe_with_hostile_names() {
+    let cmds = upload_chunk_commands("/tmp/x'; rm -rf /; '", &base64_encode("data"));
+    assert!(cmds.iter().all(|c| !c.contains("; rm -rf / ;") || c.contains("'\\''")),
+        "raw quote must never appear unescaped: {:?}", cmds);
+}
+
+#[test]
+fn audit_command_truncates_at_512_chars_on_char_boundary() {
+    use agentic_armor::mcp::server::audit_command;
+    let long: Vec<String> = vec!["x".repeat(600)];
+    let truncated = audit_command(&long);
+    assert_eq!(truncated.chars().count(), 512);
+
+    let multibyte: Vec<String> = vec![format!("{}{}", "a".repeat(510), "é中🎉")];
+    let t = audit_command(&multibyte);
+    assert!(t.chars().count() <= 512);
+    assert!(t.is_char_boundary(t.len()), "must end on a UTF-8 boundary");
+
+    assert_eq!(audit_command(&[]), "");
+    assert_eq!(audit_command(&["echo".into(), "hi".into()]), "echo hi");
+}
+
+#[test]
+fn resolve_network_mode_matrix() {
+    use agentic_armor::docker::resolve_network_mode;
+    assert_eq!(resolve_network_mode("bridge", Some("armor-t1")).unwrap(), "armor-t1");
+    assert_eq!(resolve_network_mode("bridge", None).unwrap(), "bridge");
+    assert_eq!(resolve_network_mode("none", None).unwrap(), "none");
+    assert!(resolve_network_mode("none", Some("armor-t1")).is_err(), "none + name rejected");
+    assert!(resolve_network_mode("bridge", Some("bridge")).is_err(), "shared bridge rejected");
+    assert!(resolve_network_mode("bridge", Some("armor-")).is_err(), "empty suffix rejected");
+    assert!(resolve_network_mode("bridge", Some("armor-a b")).is_err(), "space rejected");
+    assert!(resolve_network_mode("host", None).is_ok(), "host handled by earlier allowlist layer");
+}
+
+#[test]
+fn upload_chunks_exact_boundary_single_chunk() {
+    let b64_exact = "A".repeat(48 * 1024);
+    let cmds = upload_chunk_commands("/tmp/b.txt", &b64_exact);
+    assert_eq!(cmds.len(), 1, "exactly 48K of base64 must be one chunk");
+    assert!(cmds[0].contains("> '/tmp/b.txt'"));
+
+    let b64_over = "A".repeat(48 * 1024 + 4);
+    let cmds = upload_chunk_commands("/tmp/b.txt", &b64_over);
+    assert_eq!(cmds.len(), 2, "48K+4 must split into two chunks");
+    assert!(cmds[0].contains("> '/tmp/b.txt'"));
+    assert!(cmds[1].contains(">> '/tmp/b.txt'"));
+}
+
+#[test]
+fn upload_chunks_each_decode_independently_and_concat() {
+    let input = "é中🎉 payload ".repeat(9000);
+    let b64 = base64_encode(&input);
+    let cmds = upload_chunk_commands("/tmp/u.txt", &b64);
+    let mut decoded = String::new();
+    for cmd in &cmds {
+        let payload = cmd.split("printf %s '").nth(1).unwrap().split("' | base64").next().unwrap();
+        let bytes = base64_decode_manual(payload);
+        decoded.push_str(&bytes);
+    }
+    assert_eq!(decoded, input, "concatenated chunk decodes must equal original");
+}
+
+fn base64_decode_manual(s: &str) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut buf: Vec<u8> = Vec::new();
+    let mut acc: u32 = 0;
+    let mut bits = 0;
+    for c in s.chars() {
+        if c == '=' || c == '\'' {
+            break;
+        }
+        let v = CHARS.iter().position(|&x| x as char == c).expect("valid b64 char") as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            buf.push((acc >> bits) as u8);
+        }
+    }
+    String::from_utf8(buf).expect("utf8")
 }

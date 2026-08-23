@@ -25,6 +25,24 @@ pub fn task_network_name(task_id: &str) -> String {
     format!("armor-{}", task_id)
 }
 
+pub fn resolve_network_mode(mode: &str, network_name: Option<&str>) -> ArmorResult<String> {
+    match (mode, network_name) {
+        ("bridge", Some(name)) => {
+            if !is_valid_task_network_name(name) {
+                return Err(ArmorError::InvalidNetworkMode(format!(
+                    "network_name must be 'armor-<taskId>' (alphanumeric/_/-), got '{}'",
+                    name
+                )));
+            }
+            Ok(name.to_string())
+        }
+        ("none", Some(_)) => Err(ArmorError::InvalidNetworkMode(
+            "network_name cannot be combined with network mode 'none'".into(),
+        )),
+        (m, _) => Ok(m.to_string()),
+    }
+}
+
 pub fn is_pid_exhaustion_error(err: &ArmorError) -> bool {
     let msg = err.to_string().to_lowercase();
     msg.contains("procready not received")
@@ -141,38 +159,19 @@ impl BollardRuntime {
     }
 
     fn connect(socket: &str) -> ArmorResult<Docker> {
-        let docker = if std::path::Path::new(socket).exists() {
+        if std::path::Path::new(socket).exists() {
             info!("Connecting to container runtime socket: {}", socket);
             Docker::connect_with_socket(
                 socket,
                 120,
                 bollard::API_DEFAULT_VERSION,
             )
-            .map_err(|e| ArmorError::DockerConnectionFailed(format!("{}: {}", socket, e)))?
+            .map_err(|e| ArmorError::DockerConnectionFailed(format!("{}: {}", socket, e)))
         } else {
             warn!("Socket not found: {} — trying default connection", socket);
             Docker::connect_with_local_defaults()
-                .map_err(|e| ArmorError::DockerConnectionFailed(e.to_string()))?
-        };
-        if let Ok(meta) = std::fs::metadata(socket) {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = meta.permissions().mode();
-            let owner_writable = mode & 0o200 != 0;
-            let accessible = std::fs::File::open(socket).is_ok();
-            if accessible && !owner_writable {
-                warn!(
-                    "Socket {} is reachable but this user cannot write to it (mode {:o}) — \
-                     container runtime calls will fail. Is the user in the docker/podman group?",
-                    socket,
-                    mode & 0o777
-                );
-            }
-            if !accessible {
-                warn!("Socket {} exists but cannot be opened by this user — \
-                       check group membership (docker/podman) or socket permissions", socket);
-            }
+                .map_err(|e| ArmorError::DockerConnectionFailed(e.to_string()))
         }
-        Ok(docker)
     }
 }
 
@@ -271,6 +270,7 @@ impl ContainerRuntime for BollardRuntime {
 
         let mut stdout_buf: Vec<u8> = Vec::new();
         let mut stderr_buf: Vec<u8> = Vec::new();
+        let mut exec_notes: Vec<String> = Vec::new();
 
         let start_exec_result = self.docker.start_exec(&exec_id, None).await;
 
@@ -287,6 +287,7 @@ impl ContainerRuntime for BollardRuntime {
                                 Ok(_) => {}
                                 Err(e) => {
                                     warn!("Exec stream error: {}", e);
+                                    exec_notes.push(format!("[agentic-armor] exec stream error: {} — output may be truncated", e));
                                     break;
                                 }
                             }
@@ -294,6 +295,7 @@ impl ContainerRuntime for BollardRuntime {
                     } => {}
                     _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {
                         warn!("Exec timed out after {}ms", timeout_ms);
+                        exec_notes.push(format!("[agentic-armor] exec timed out after {}ms — the process may still be running inside the container", timeout_ms));
                     }
                 }
             }
@@ -307,12 +309,23 @@ impl ContainerRuntime for BollardRuntime {
 
         let exec_inspect = self.docker.inspect_exec(&exec_id).await?;
         let exit_code = exec_inspect.exit_code.unwrap_or(-1);
+        if exit_code < 0 && exec_notes.is_empty() {
+            exec_notes.push("[agentic-armor] exec produced no exit code (killed or still running)".into());
+        }
         let duration_ms = start.elapsed().as_millis() as u64;
+
+        let mut stderr = String::from_utf8_lossy(&stderr_buf).to_string();
+        for note in &exec_notes {
+            if !stderr.is_empty() {
+                stderr.push('\n');
+            }
+            stderr.push_str(note);
+        }
 
         Ok(ExecResult {
             exit_code,
             stdout: String::from_utf8_lossy(&stdout_buf).to_string(),
-            stderr: String::from_utf8_lossy(&stderr_buf).to_string(),
+            stderr,
             duration_ms,
         })
     }
@@ -348,9 +361,9 @@ impl BollardRuntime {
         config: &ArmorContainerConfig,
     ) -> ArmorResult<bollard::container::Config<String>> {
         if !self.config.allowed_images.iter().any(|img| img == &config.image) {
-            return Err(ArmorError::ForbiddenMount(format!(
-                "Image not allowed"
-            )));
+            return Err(ArmorError::ForbiddenMount(
+                "Image not allowed".to_string(),
+            ));
         }
 
         let cmd = config.command.clone();
@@ -411,23 +424,7 @@ impl BollardRuntime {
             }
         }
 
-        let docker_network_mode = match (effective_network_mode.as_str(), &config.network_name) {
-            ("bridge", Some(name)) => {
-                if !is_valid_task_network_name(name) {
-                    return Err(ArmorError::InvalidNetworkMode(format!(
-                        "network_name must be 'armor-<taskId>' (alphanumeric/_/-), got '{}'",
-                        name
-                    )));
-                }
-                name.clone()
-            }
-            ("none", Some(_)) => {
-                return Err(ArmorError::InvalidNetworkMode(
-                    "network_name cannot be combined with network mode 'none'".into(),
-                ));
-            }
-            (mode, _) => mode.to_string(),
-        };
+        let docker_network_mode = resolve_network_mode(&effective_network_mode, config.network_name.as_deref())?;
 
         let memory = config.memory_limit
             .unwrap_or(self.config.container_memory_mb * 1024 * 1024)
