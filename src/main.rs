@@ -10,6 +10,7 @@ async fn main() -> Result<(), ArmorError> {
 
     tracing_subscriber::fmt()
         .with_target(false)
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "agentic_armor=info,mcp_sdk=info".into()),
