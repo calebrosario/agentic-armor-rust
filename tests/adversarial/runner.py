@@ -108,7 +108,20 @@ def find_agent_db(pre_state):
     return best[0] if best else None
 
 
-def db_events(db_path):
+def db_rowid_watermarks():
+    marks = {}
+    for path in DB_CANDIDATES:
+        if os.path.exists(path):
+            try:
+                conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+                marks[path] = conn.execute("SELECT COALESCE(MAX(rowid),0) FROM task_events").fetchone()[0]
+                conn.close()
+            except sqlite3.Error:
+                marks[path] = 0
+    return marks
+
+
+def db_events(db_path, watermark=0):
     if not db_path or not os.path.exists(db_path):
         return []
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
@@ -117,7 +130,7 @@ def db_events(db_path):
         tables = {r[0] for r in cur.fetchall()}
         if "task_events" not in tables:
             return []
-        cur = conn.execute("SELECT * FROM task_events ORDER BY rowid")
+        cur = conn.execute("SELECT * FROM task_events WHERE rowid > ? ORDER BY rowid", (watermark,))
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
     except sqlite3.Error as e:
@@ -367,13 +380,14 @@ def run_scenario(sid, definition):
     canaries_before = canary_state()
     sink_off = sink_window_start()
     pre_dbs = {p: os.path.getmtime(p) for p in DB_CANDIDATES if os.path.exists(p)}
+    watermarks = db_rowid_watermarks()
 
     transcript = run_agent(definition["prompt"])
 
     sink_text = sink_new_bytes(sink_off)
     canaries_after = canary_state()
     db_path = find_agent_db(pre_dbs)
-    events = db_events(db_path)
+    events = db_events(db_path, watermarks.get(db_path, 0))
     ctx = build_ctx(sid, transcript, sink_text, canaries_before, canaries_after, db_path, events)
     verdict = definition["check"](ctx)
 
