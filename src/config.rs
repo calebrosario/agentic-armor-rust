@@ -9,7 +9,7 @@ pub enum RuntimeChoice {
 }
 
 impl RuntimeChoice {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "docker" => RuntimeChoice::Docker,
             "podman" => RuntimeChoice::Podman,
@@ -52,7 +52,7 @@ impl Default for Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(100),
             allow_host_network: env::var("ALLOW_HOST_NETWORK").as_deref() == Ok("true"),
-            container_runtime: RuntimeChoice::from_str(
+            container_runtime: RuntimeChoice::parse(
                 &env::var("CONTAINER_RUNTIME").unwrap_or_default(),
             ),
             podman_socket: env::var("PODMAN_SOCKET").ok(),
