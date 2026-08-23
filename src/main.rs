@@ -2,6 +2,7 @@ use agentic_armor::{
     ArmorError, BollardRuntime, Config, ContainerRuntime, TaskLifecycle, TaskRegistry,
 };
 use std::sync::Arc;
+use std::str::FromStr;
 use tracing::{error, info};
 
 #[tokio::main]
@@ -34,7 +35,12 @@ async fn main() -> Result<(), ArmorError> {
 
     let _ = std::fs::create_dir_all("./data");
 
-    let pool = sqlx::SqlitePool::connect("sqlite://./data/agentic_armor.db?mode=rwc&busy_timeout=5000")
+    let db_options = sqlx::sqlite::SqliteConnectOptions::from_str(
+        "sqlite://./data/agentic_armor.db?mode=rwc",
+    )
+    .map_err(|e| ArmorError::Database(e.to_string()))?
+    .busy_timeout(std::time::Duration::from_millis(5000));
+    let pool = sqlx::SqlitePool::connect_with(db_options)
         .await
         .map_err(|e| ArmorError::Database(e.to_string()))?;
 
