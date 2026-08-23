@@ -14,6 +14,7 @@ use tracing::{info, warn};
 
 pub fn is_valid_task_network_name(name: &str) -> bool {
     name.starts_with("armor-")
+        && name.len() > "armor-".len()
         && name.len() <= 64
         && name["armor-".len()..]
             .chars()
