@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::docker::{task_network_name, ArmorContainerConfig, ContainerRuntime, ExecRequest, Mount};
+use crate::docker::{is_pid_exhaustion_error, task_network_name, ArmorContainerConfig, ContainerRuntime, ExecRequest, Mount};
 use crate::error::{ArmorError, ArmorResult};
 use crate::task::{TaskLifecycle, TaskRegistry};
 use mcp_sdk::{CallToolResult, McpServer, StdioTransport, ToolBuilder};
@@ -237,18 +237,36 @@ async fn register_task_exec(
                     }).await {
                         Ok(r) => r,
                         Err(e) => {
+                            let hint = if is_pid_exhaustion_error(&e) {
+                                " (task resource budget exhausted — stop runaway processes inside the task, or task_delete and recreate it)"
+                            } else {
+                                ""
+                            };
                             reg.add_event(task_id, "exec_logged", &format!("exec error ({}): {}", e, audit_cmd)).await.ok();
-                            return Ok(CallToolResult::error(format!("Exec failed: {}", e)));
+                            return Ok(CallToolResult::error(format!("Exec failed: {}{}", e, hint)));
                         }
                     };
 
                     reg.add_event(task_id, "exec_logged", &format!("exec exit={} durMs={}: {}", result.exit_code, result.duration_ms, audit_cmd)).await.ok();
 
+                    let fork_hint = if result.stderr.contains("can't fork")
+                        || result.stderr.contains("Cannot fork")
+                        || result.stdout.contains("can't fork")
+                    {
+                        " — task resource budget exhausted: stop runaway processes inside the task, or task_delete and recreate it"
+                    } else {
+                        ""
+                    };
+
                     Ok(CallToolResult::text(json!({
                         "success": result.exit_code == 0,
                         "exitCode": result.exit_code,
                         "stdout": result.stdout,
-                        "stderr": result.stderr,
+                        "stderr": if fork_hint.is_empty() {
+                            result.stderr.clone()
+                        } else {
+                            format!("{}{}", result.stderr, fork_hint)
+                        },
                         "durationMs": result.duration_ms
                     }).to_string()))
                 }
@@ -489,7 +507,7 @@ async fn register_task_delete(server: &Arc<McpServer>, runtime: &Arc<dyn Contain
 
     server.register_tool(
         ToolBuilder::new("task_delete")
-            .description("Delete a task and destroy its container")
+            .description("Delete a task and destroy its container + network. Returns alreadyGone=true when the taskId never existed (idempotent); audit events are retained")
             .schema(json!({
                 "type": "object",
                 "properties": { "taskId": { "type": "string" } },
@@ -501,15 +519,19 @@ async fn register_task_delete(server: &Arc<McpServer>, runtime: &Arc<dyn Contain
                 async move {
                     let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
 
-                    if let Ok(container_id) = lc.get_container_id(task_id).await {
-                        if let Err(e) = rt.destroy_container(&container_id).await {
-                            warn!("Failed to destroy container {}: {}", container_id, e);
-                        }
-                    }
+                    let had_container = lc.get_container_id(task_id).await.is_ok();
+                    let had_task = lc.get_task(task_id).await.is_ok();
 
-                    if let Err(e) = rt.remove_network(&task_network_name(task_id)).await {
-                        if !e.to_string().to_lowercase().contains("no such network") {
-                            warn!("Failed to remove network for task {}: {}", task_id, e);
+                    if had_container {
+                        if let Ok(container_id) = lc.get_container_id(task_id).await {
+                            if let Err(e) = rt.destroy_container(&container_id).await {
+                                warn!("Failed to destroy container {}: {}", container_id, e);
+                            }
+                        }
+                        if let Err(e) = rt.remove_network(&task_network_name(task_id)).await {
+                            if !e.to_string().to_lowercase().contains("no such network") {
+                                warn!("Failed to remove network for task {}: {}", task_id, e);
+                            }
                         }
                     }
 
@@ -519,7 +541,8 @@ async fn register_task_delete(server: &Arc<McpServer>, runtime: &Arc<dyn Contain
 
                     Ok(CallToolResult::text(json!({
                         "success": true,
-                        "taskId": task_id
+                        "taskId": task_id,
+                        "alreadyGone": !had_task
                     }).to_string()))
                 }
             }),

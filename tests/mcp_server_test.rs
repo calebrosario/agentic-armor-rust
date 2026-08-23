@@ -192,3 +192,15 @@ fn task_network_names_are_namespaced_and_valid() {
     let long_name = format!("armor-{}", "x".repeat(80));
     assert!(!is_valid_task_network_name(&long_name), "over 64 chars");
 }
+
+#[test]
+fn pid_exhaustion_signatures_are_recognized() {
+    use agentic_armor::error::ArmorError;
+    use agentic_armor::docker::is_pid_exhaustion_error;
+    assert!(is_pid_exhaustion_error(&ArmorError::Docker(
+        "Error in the hyper legacy client: OCI runtime exec failed: exec failed: unable to start container process: procReady not received".into())));
+    assert!(is_pid_exhaustion_error(&ArmorError::Docker("sh: can't fork: Resource temporarily unavailable".into())));
+    assert!(is_pid_exhaustion_error(&ArmorError::Docker("write /proc/self/oom: No space left on device".into())));
+    assert!(!is_pid_exhaustion_error(&ArmorError::Docker("image not found".into())));
+    assert!(!is_pid_exhaustion_error(&ArmorError::TaskNotFound("x".into())));
+}
