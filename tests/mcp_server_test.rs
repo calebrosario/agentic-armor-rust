@@ -166,7 +166,8 @@ fn upload_empty_content_creates_truncated_file() {
 
 #[test]
 fn upload_first_chunk_guards_final_symlink() {
-    let cmds = upload_chunk_commands("/workspace/f.txt", &base64_encode("data"));
+    let cmds = upload_chunk_commands("/workspace/f.txt", &base64_encode(&"x".repeat(100 * 1024)));
+    assert!(cmds.len() >= 2, "payload must span multiple chunks");
     assert!(cmds[0].contains("[ ! -L '/workspace/f.txt' ]"));
     assert!(!cmds[1].contains("[ ! -L"), "guard only needed on first chunk");
 }
