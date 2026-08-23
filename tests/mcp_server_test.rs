@@ -1,5 +1,5 @@
 use agentic_armor::config::Config;
-use agentic_armor::mcp::server::{base64_encode, default_task_mounts, is_valid_network_mode, validate_path};
+use agentic_armor::mcp::server::{base64_encode, default_task_mounts, is_valid_network_mode, upload_chunk_commands, validate_path};
 
 fn mounts_by_target(target: &str) -> agentic_armor::Mount {
     default_task_mounts()
@@ -133,4 +133,38 @@ fn base64_encode_roundtrips() {
         assert_eq!(encoded.len() % 4, 0);
         assert!(encoded.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
     }
+}
+
+#[test]
+fn upload_chunks_stay_under_argmax() {
+    let big_b64 = base64_encode(&"x".repeat(300 * 1024));
+    let cmds = upload_chunk_commands("/workspace/big.txt", &big_b64);
+    assert!(cmds.len() >= 7, "300KB payload must split into multiple chunks, got {}", cmds.len());
+    for cmd in &cmds {
+        assert!(cmd.len() < 64 * 1024, "chunk command must stay under MAX_ARG_STRLEN (128KB), got {}", cmd.len());
+    }
+    assert!(cmds[0].contains("> '/workspace/big.txt'"));
+    assert!(cmds[1].contains(">> '/workspace/big.txt'"), "subsequent chunks must append");
+}
+
+#[test]
+fn upload_chunk_boundaries_decode_independently() {
+    let input = "A".repeat(200 * 1024);
+    let b64 = base64_encode(&input);
+    for chunk in b64.as_bytes().chunks(48 * 1024) {
+        assert_eq!(chunk.len() % 4, 0, "every non-final chunk must be base64-aligned");
+    }
+}
+
+#[test]
+fn upload_empty_content_creates_truncated_file() {
+    let cmds = upload_chunk_commands("/tmp/empty.txt", "");
+    assert_eq!(cmds.len(), 1);
+    assert!(cmds[0].contains(": > '/tmp/empty.txt'"));
+}
+
+#[test]
+fn upload_chunks_cleanup_on_failure() {
+    let cmds = upload_chunk_commands("/workspace/f.txt", &base64_encode("data"));
+    assert!(cmds.iter().all(|c| c.contains("rm -f '/workspace/f.txt'")), "failed writes must not leave partial files");
 }

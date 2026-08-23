@@ -260,18 +260,27 @@ async fn register_task_upload(
                         Err(e) => return Ok(CallToolResult::error(format!("Cannot find container: {}", e))),
                     };
 
-                    let b64 = base64_encode(content);
-                    let result = match rt.exec_in_container(&container_id, &ExecRequest {
-                        command: vec!["sh".into(), "-c".into(), format!("echo '{}' | base64 -d > '{}'", b64, path)],
-                        timeout_ms: Some(30_000),
-                        ..Default::default()
-                    }).await {
+                    let resolved = match resolve_path_in_container(&rt, &container_id, path, false).await {
                         Ok(r) => r,
-                        Err(e) => return Ok(CallToolResult::error(format!("Upload failed: {}", e))),
+                        Err(e) => return Ok(CallToolResult::error(e)),
                     };
+                    if let Err(e) = validate_path(&resolved, &cfg) {
+                        return Ok(CallToolResult::error(format!("Path escapes allowed roots via symlink: {}", e)));
+                    }
 
-                    if result.exit_code != 0 {
-                        return Ok(CallToolResult::error(result.stderr));
+                    let b64 = base64_encode(content);
+                    for script in upload_chunk_commands(&resolved, &b64) {
+                        let result = match rt.exec_in_container(&container_id, &ExecRequest {
+                            command: vec!["sh".into(), "-c".into(), script],
+                            timeout_ms: Some(60_000),
+                            ..Default::default()
+                        }).await {
+                            Ok(r) => r,
+                            Err(e) => return Ok(CallToolResult::error(format!("Upload failed: {}", e))),
+                        };
+                        if result.exit_code != 0 {
+                            return Ok(CallToolResult::error(result.stderr));
+                        }
                     }
 
                     Ok(CallToolResult::text(json!({
@@ -322,9 +331,17 @@ async fn register_task_download(
                         Err(e) => return Ok(CallToolResult::error(format!("Cannot find container: {}", e))),
                     };
 
+                    let resolved = match resolve_path_in_container(&rt, &container_id, path, true).await {
+                        Ok(r) => r,
+                        Err(e) => return Ok(CallToolResult::error(e)),
+                    };
+                    if let Err(e) = validate_path(&resolved, &cfg) {
+                        return Ok(CallToolResult::error(format!("Path escapes allowed roots via symlink: {}", e)));
+                    }
+
                     let max_bytes = 10 * 1024 * 1024;
                     let result = match rt.exec_in_container(&container_id, &ExecRequest {
-                        command: vec!["sh".into(), "-c".into(), format!("head -c {} '{}'", max_bytes, path)],
+                        command: vec!["sh".into(), "-c".into(), format!("head -c {} '{}'", max_bytes, resolved)],
                         timeout_ms: Some(30_000),
                         ..Default::default()
                     }).await {
@@ -550,4 +567,52 @@ pub fn base64_encode(input: &str) -> String {
         }
     }
     result
+}
+
+async fn resolve_path_in_container(
+    rt: &Arc<dyn ContainerRuntime>,
+    container_id: &str,
+    path: &str,
+    follow_final: bool,
+) -> Result<String, String> {
+    let script = if follow_final {
+        format!("readlink -f '{}'", path)
+    } else {
+        format!("echo \"$(readlink -f \"$(dirname '{}')\")/$(basename '{}')\"", path, path)
+    };
+    let result = rt
+        .exec_in_container(container_id, &ExecRequest {
+            command: vec!["sh".into(), "-c".into(), script],
+            timeout_ms: Some(10_000),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| format!("Path resolution failed: {}", e))?;
+    if result.exit_code != 0 {
+        return Err(format!("Path resolution failed: {}", result.stderr.trim()));
+    }
+    Ok(result.stdout.trim().to_string())
+}
+
+const UPLOAD_CHUNK_BYTES: usize = 48 * 1024;
+
+pub fn upload_chunk_commands(resolved_path: &str, b64: &str) -> Vec<String> {
+    if b64.is_empty() {
+        return vec![format!(": > '{}'", resolved_path)];
+    }
+    b64.as_bytes()
+        .chunks(UPLOAD_CHUNK_BYTES)
+        .enumerate()
+        .map(|(i, chunk)| {
+            let redirect = if i == 0 { ">" } else { ">>" };
+            format!(
+                "mkdir -p \"$(dirname '{}')\" && printf %s '{}' | base64 -d {} '{}' || {{ rm -f '{}'; exit 1; }}",
+                resolved_path,
+                std::str::from_utf8(chunk).unwrap_or(""),
+                redirect,
+                resolved_path,
+                resolved_path
+            )
+        })
+        .collect()
 }
