@@ -109,20 +109,14 @@ async fn register_task_create(
                     if let Some(net) = &per_task_network {
                         if let Err(e) = rt.create_network(net).await {
                             error!("Network creation failed for task {}: {}", task_id, e);
-                            if let Err(rb) = lc.delete_task(task_id).await {
-                                error!("Rollback failed: task {} row not removed ({}) — it now counts toward the concurrency cap; delete it manually", task_id, rb);
-                            }
+                            rollback_task_create(&rt, &lc, task_id, None, None).await;
                             return Ok(CallToolResult::error(format!("Network creation failed: {}", e)));
                         }
                     }
 
-                    let network = match (&per_task_network, network_mode) {
-                        (Some(net), "bridge") => NetworkConfig::Bridge { network: net.clone() },
-                        (None, "none") => NetworkConfig::None,
-                        _ => {
-                            let _ = lc.delete_task(task_id).await;
-                            return Ok(CallToolResult::error("Invalid network mode: allowed values are 'none' and 'bridge'."));
-                        }
+                    let network = match &per_task_network {
+                        Some(net) => NetworkConfig::Bridge { network: net.clone() },
+                        None => NetworkConfig::None,
                     };
 
                     let container_config = ArmorContainerConfig {
@@ -151,47 +145,20 @@ async fn register_task_create(
                         }
                         Err(e) => {
                             error!("Container creation failed for task {}: {}", task_id, e);
-                            if let Some(net) = &per_task_network {
-                                if let Err(rb) = rt.remove_network(net).await {
-                                    warn!("Rollback: network removal failed for {}: {} — orphaned network, remove manually", net, rb);
-                                }
-                            }
-                            if let Err(rb) = lc.delete_task(task_id).await {
-                                error!("Rollback failed: task {} row not removed ({}) — it now counts toward the concurrency cap; delete it manually", task_id, rb);
-                            }
+                            rollback_task_create(&rt, &lc, task_id, None, per_task_network.as_deref()).await;
                             return Ok(CallToolResult::error(format!("Container creation failed: {}", e)));
                         }
                     };
 
                     if let Err(e) = rt.start_container(&container_id).await {
                         error!("Container start failed for {}: {}", container_id, e);
-                        if let Err(rb) = rt.destroy_container(&container_id).await {
-                            warn!("Rollback: container destroy failed for {}: {} — container may remain on host", container_id, rb);
-                        }
-                        if let Some(net) = &per_task_network {
-                            if let Err(rb) = rt.remove_network(net).await {
-                                warn!("Rollback: network removal failed for {}: {} — orphaned network, remove manually", net, rb);
-                            }
-                        }
-                        if let Err(rb) = lc.delete_task(task_id).await {
-                            error!("Rollback failed: task {} row not removed ({}) — it now counts toward the concurrency cap; delete it manually", task_id, rb);
-                        }
+                        rollback_task_create(&rt, &lc, task_id, Some(&container_id), per_task_network.as_deref()).await;
                         return Ok(CallToolResult::error(format!("Container start failed: {}", e)));
                     }
 
                     if let Err(e) = reg.set_container_id(task_id, &container_id).await {
                         error!("Failed to persist containerId: {}", e);
-                        if let Err(rb) = rt.destroy_container(&container_id).await {
-                            warn!("Rollback: container destroy failed for {}: {} — container may remain on host", container_id, rb);
-                        }
-                        if let Some(net) = &per_task_network {
-                            if let Err(rb) = rt.remove_network(net).await {
-                                warn!("Rollback: network removal failed for {}: {} — orphaned network, remove manually", net, rb);
-                            }
-                        }
-                        if let Err(rb) = lc.delete_task(task_id).await {
-                            error!("Rollback failed: task {} row not removed ({}) — it now counts toward the concurrency cap; delete it manually", task_id, rb);
-                        }
+                        rollback_task_create(&rt, &lc, task_id, Some(&container_id), per_task_network.as_deref()).await;
                         return Ok(CallToolResult::error(format!("Failed to associate container: {}", e)));
                     }
 
@@ -601,6 +568,28 @@ async fn register_task_logs(server: &Arc<McpServer>, registry: &Arc<TaskRegistry
                 }
             }),
     ).await;
+}
+
+async fn rollback_task_create(
+    rt: &Arc<dyn ContainerRuntime>,
+    lc: &TaskLifecycle,
+    task_id: &str,
+    container_id: Option<&str>,
+    network_name: Option<&str>,
+) {
+    if let Some(cid) = container_id {
+        if let Err(e) = rt.destroy_container(cid).await {
+            warn!("Rollback: container destroy failed for {}: {} — container may remain on host", cid, e);
+        }
+    }
+    if let Some(net) = network_name {
+        if let Err(e) = rt.remove_network(net).await {
+            warn!("Rollback: network removal failed for {}: {} — orphaned network, remove manually", net, e);
+        }
+    }
+    if let Err(e) = lc.delete_task(task_id).await {
+        error!("Rollback failed: task {} row not removed ({}) — it now counts toward the concurrency cap; delete it manually", task_id, e);
+    }
 }
 
 pub fn task_tmpfs_options(size_mb: usize) -> String {
