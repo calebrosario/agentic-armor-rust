@@ -53,7 +53,7 @@ Every container created by Agentic Armor is hardened — **non-overridable by de
 | Root filesystem | Read-only | ❌ Hardcoded |
 | Privilege escalation | `no-new-privileges` | ❌ Hardcoded |
 | Container user | `opencode` (non-root) | ❌ Hardcoded |
-| Network mode | `none` (no internet) | ❌ Default, only bridge allowed |
+| Network mode | `none` (no internet) | ❌ Default; `network:"bridge"` grants egress via an **isolated per-task network** — cross-task traffic unreachable |
 | Docker socket mounts | Blocked (source + target, canonicalized) | ❌ Pattern + symlink check |
 | Image selection | Allowlist only | ❌ Enforced at runtime layer |
 | Memory | 512MB minimum | ❌ Clamped (never 0) |
