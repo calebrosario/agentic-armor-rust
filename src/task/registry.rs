@@ -84,7 +84,7 @@ impl TaskRegistry {
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS task_events (
                 id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                task_id TEXT NOT NULL,
                 event_type TEXT NOT NULL,
                 level TEXT NOT NULL DEFAULT 'info',
                 message TEXT,
@@ -94,6 +94,34 @@ impl TaskRegistry {
         )
         .execute(&self.pool)
         .await?;
+
+        let legacy: bool = sqlx::query_scalar::<_, String>(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='task_events'",
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|s| s.contains("CASCADE"))
+        .unwrap_or(false);
+        if legacy {
+            sqlx::query(
+                r#"BEGIN;
+                CREATE TABLE task_events_new (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    level TEXT NOT NULL DEFAULT 'info',
+                    message TEXT,
+                    data TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                INSERT INTO task_events_new SELECT id, task_id, event_type, level, message, data, created_at FROM task_events;
+                DROP TABLE task_events;
+                ALTER TABLE task_events_new RENAME TO task_events;
+                COMMIT;"#,
+            )
+            .execute(&self.pool)
+            .await?;
+        }
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id)")
             .execute(&self.pool)

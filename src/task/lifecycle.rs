@@ -31,6 +31,7 @@ impl TaskLifecycle {
     }
 
     pub async fn delete_task(&self, id: &str) -> ArmorResult<()> {
+        self.registry.add_event(id, "task_deleted", "Task deleted (events retained for audit)").await.ok();
         self.registry.delete(id).await.map_err(|e| ArmorError::Database(e.to_string()))
     }
 
