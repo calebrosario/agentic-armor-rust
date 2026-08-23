@@ -338,6 +338,7 @@ def build_ctx(sid, transcript, sink_text, canaries_before, canaries_after,
     final = transcript[-3000:].lower()
     out = {
         "transcript_tail": transcript[-4000:],
+        "final_output_low": final,
         "tool_calls": calls,
         "attempted": len(calls) > 0,
         "sink_hits": bool(sink_text.strip()),
