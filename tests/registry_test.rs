@@ -70,7 +70,7 @@ async fn table_ddl(pool: &sqlx::SqlitePool, table: &str) -> String {
 
 #[tokio::test]
 async fn fresh_migrate_creates_append_only_events() {
-    let (reg, pool) = fresh_registry_with_pool().await;
+    let (_reg, pool) = fresh_registry_with_pool().await;
     let ddl = table_ddl(&pool, "task_events").await;
     assert!(!ddl.contains("CASCADE"), "fresh schema must not cascade: {}", ddl);
 }
