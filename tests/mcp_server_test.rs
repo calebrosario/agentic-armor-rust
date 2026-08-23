@@ -177,3 +177,18 @@ fn upload_chunks_cleanup_on_failure() {
     let cmds = upload_chunk_commands("/workspace/f.txt", &base64_encode("data"));
     assert!(cmds.iter().all(|c| c.contains("rm -f '/workspace/f.txt'")), "failed writes must not leave partial files");
 }
+
+#[test]
+fn task_network_names_are_namespaced_and_valid() {
+    use agentic_armor::docker::{is_valid_task_network_name, task_network_name};
+    assert_eq!(task_network_name("s12-a"), "armor-s12-a");
+    assert!(is_valid_task_network_name("armor-s12-a"));
+    assert!(is_valid_task_network_name("armor-My_Task-01"));
+    assert!(!is_valid_task_network_name("bridge"), "shared bridge must be rejected");
+    assert!(!is_valid_task_network_name("host"));
+    assert!(!is_valid_task_network_name("armor-"), "empty task id part");
+    assert!(!is_valid_task_network_name("armor-a/b"), "path chars");
+    assert!(!is_valid_task_network_name("armor-a b"), "spaces");
+    let long_name = format!("armor-{}", "x".repeat(80));
+    assert!(!is_valid_task_network_name(&long_name), "over 64 chars");
+}

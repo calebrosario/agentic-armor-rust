@@ -12,6 +12,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
+pub fn is_valid_task_network_name(name: &str) -> bool {
+    name.starts_with("armor-")
+        && name.len() <= 64
+        && name["armor-".len()..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+pub fn task_network_name(task_id: &str) -> String {
+    format!("armor-{}", task_id)
+}
+
 #[async_trait]
 pub trait ContainerRuntime: Send + Sync {
     async fn ping(&self) -> ArmorResult<()>;
@@ -22,6 +34,8 @@ pub trait ContainerRuntime: Send + Sync {
     async fn destroy_container(&self, id: &str) -> ArmorResult<()>;
     async fn exec_in_container(&self, id: &str, request: &ExecRequest) -> ArmorResult<ExecResult>;
     async fn is_running(&self, id: &str) -> ArmorResult<bool>;
+    async fn create_network(&self, name: &str) -> ArmorResult<()>;
+    async fn remove_network(&self, name: &str) -> ArmorResult<()>;
     fn runtime_name(&self) -> &str;
 }
 
@@ -278,10 +292,29 @@ impl ContainerRuntime for BollardRuntime {
         let info = self.docker.inspect_container(id, None).await?;
         Ok(info.state.and_then(|s| s.running).unwrap_or(false))
     }
+
+    async fn create_network(&self, name: &str) -> ArmorResult<()> {
+        if self.docker.inspect_network::<String>(name, None).await.is_ok() {
+            return Ok(());
+        }
+        self.docker
+            .create_network(bollard::network::CreateNetworkOptions {
+                name: name.to_string(),
+                check_duplicate: true,
+                ..Default::default()
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn remove_network(&self, name: &str) -> ArmorResult<()> {
+        self.docker.remove_network(name).await?;
+        Ok(())
+    }
 }
 
 impl BollardRuntime {
-    fn build_bollard_config(
+    pub fn build_bollard_config(
         &self,
         config: &ArmorContainerConfig,
     ) -> ArmorResult<bollard::container::Config<String>> {
@@ -349,6 +382,24 @@ impl BollardRuntime {
             }
         }
 
+        let docker_network_mode = match (effective_network_mode.as_str(), &config.network_name) {
+            ("bridge", Some(name)) => {
+                if !is_valid_task_network_name(name) {
+                    return Err(ArmorError::InvalidNetworkMode(format!(
+                        "network_name must be 'armor-<taskId>' (alphanumeric/_/-), got '{}'",
+                        name
+                    )));
+                }
+                name.clone()
+            }
+            ("none", Some(_)) => {
+                return Err(ArmorError::InvalidNetworkMode(
+                    "network_name cannot be combined with network mode 'none'".into(),
+                ));
+            }
+            (mode, _) => mode.to_string(),
+        };
+
         let memory = config.memory_limit
             .unwrap_or(self.config.container_memory_mb * 1024 * 1024)
             .max(64 * 1024 * 1024);
@@ -366,7 +417,7 @@ impl BollardRuntime {
         let host_config = HostConfig {
             binds: if binds.is_empty() { None } else { Some(binds) },
             tmpfs: if tmpfs.is_empty() { None } else { Some(tmpfs) },
-            network_mode: Some(effective_network_mode),
+            network_mode: Some(docker_network_mode),
             memory: Some(memory),
             cpu_shares: Some(cpu_shares),
             pids_limit: Some(pids_limit),

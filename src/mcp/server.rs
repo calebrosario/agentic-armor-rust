@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::docker::{ArmorContainerConfig, ContainerRuntime, ExecRequest, Mount};
+use crate::docker::{task_network_name, ArmorContainerConfig, ContainerRuntime, ExecRequest, Mount};
 use crate::error::{ArmorError, ArmorResult};
 use crate::task::{TaskLifecycle, TaskRegistry};
 use mcp_sdk::{CallToolResult, McpServer, StdioTransport, ToolBuilder};
@@ -100,11 +100,26 @@ async fn register_task_create(
                         Err(e) => return Ok(CallToolResult::error(format!("Task creation failed: {}", e))),
                     };
 
+                    let per_task_network = if network_mode == "bridge" {
+                        Some(task_network_name(task_id))
+                    } else {
+                        None
+                    };
+
+                    if let Some(net) = &per_task_network {
+                        if let Err(e) = rt.create_network(net).await {
+                            error!("Network creation failed for task {}: {}", task_id, e);
+                            let _ = lc.delete_task(task_id).await;
+                            return Ok(CallToolResult::error(format!("Network creation failed: {}", e)));
+                        }
+                    }
+
                     let container_config = ArmorContainerConfig {
                         name: format!("armor-{}", task.id),
                         image: image.to_string(),
                         command: Some(vec!["sleep".into(), "infinity".into()]),
                         network_mode: Some(network_mode.into()),
+                        network_name: per_task_network.clone(),
                         memory_limit: Some(cfg.container_memory_mb * 1024 * 1024),
                         cpu_shares: Some(cfg.container_cpu_shares),
                         pids_limit: Some(cfg.container_pids_limit),
@@ -119,13 +134,16 @@ async fn register_task_create(
                     let container_id = match rt.create_container(&container_config).await {
                         Ok(id) => {
                             if network_mode == "bridge" {
-                                warn!("Task {} created with network access (bridge)", task_id);
-                                reg.add_event(task_id, "network_enabled", "Container created with bridge networking").await.ok();
+                                warn!("Task {} created with network access (isolated bridge {})", task_id, task_network_name(task_id));
+                                reg.add_event(task_id, "network_enabled", "Container created with isolated per-task bridge networking").await.ok();
                             }
                             id
                         }
                         Err(e) => {
                             error!("Container creation failed for task {}: {}", task_id, e);
+                            if let Some(net) = &per_task_network {
+                                let _ = rt.remove_network(net).await;
+                            }
                             let _ = lc.delete_task(task_id).await;
                             return Ok(CallToolResult::error(format!("Container creation failed: {}", e)));
                         }
@@ -134,6 +152,9 @@ async fn register_task_create(
                     if let Err(e) = rt.start_container(&container_id).await {
                         error!("Container start failed for {}: {}", container_id, e);
                         let _ = rt.destroy_container(&container_id).await;
+                        if let Some(net) = &per_task_network {
+                            let _ = rt.remove_network(net).await;
+                        }
                         let _ = lc.delete_task(task_id).await;
                         return Ok(CallToolResult::error(format!("Container start failed: {}", e)));
                     }
@@ -141,6 +162,9 @@ async fn register_task_create(
                     if let Err(e) = reg.set_container_id(task_id, &container_id).await {
                         error!("Failed to persist containerId: {}", e);
                         let _ = rt.destroy_container(&container_id).await;
+                        if let Some(net) = &per_task_network {
+                            let _ = rt.remove_network(net).await;
+                        }
                         let _ = lc.delete_task(task_id).await;
                         return Ok(CallToolResult::error(format!("Failed to associate container: {}", e)));
                     }
@@ -480,6 +504,12 @@ async fn register_task_delete(server: &Arc<McpServer>, runtime: &Arc<dyn Contain
                     if let Ok(container_id) = lc.get_container_id(task_id).await {
                         if let Err(e) = rt.destroy_container(&container_id).await {
                             warn!("Failed to destroy container {}: {}", container_id, e);
+                        }
+                    }
+
+                    if let Err(e) = rt.remove_network(&task_network_name(task_id)).await {
+                        if !e.to_string().to_lowercase().contains("no such network") {
+                            warn!("Failed to remove network for task {}: {}", task_id, e);
                         }
                     }
 
