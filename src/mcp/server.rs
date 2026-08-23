@@ -102,11 +102,7 @@ async fn register_task_create(
                         no_new_privileges: Some(true),
                         cap_drop: Some(vec!["ALL".into()]),
                         user: Some("opencode".into()),
-                        mounts: Some(vec![
-                            Mount { source: "".into(), target: "/tmp".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some("size=64m".into()) },
-                            Mount { source: "".into(), target: "/home/opencode".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some("size=64m".into()) },
-                            Mount { source: "".into(), target: "/workspace".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some("size=256m".into()) },
-                        ]),
+                        mounts: Some(default_task_mounts()),
                         ..Default::default()
                     };
 
@@ -486,7 +482,15 @@ async fn register_task_logs(server: &Arc<McpServer>, registry: &Arc<TaskRegistry
     ).await;
 }
 
-fn validate_path(path: &str, config: &Config) -> Result<(), String> {
+pub fn default_task_mounts() -> Vec<Mount> {
+    vec![
+        Mount { source: "".into(), target: "/tmp".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some("size=64m,uid=1001,gid=1001,mode=0775".into()) },
+        Mount { source: "".into(), target: "/home/opencode".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some("size=64m,uid=1001,gid=1001,mode=0775".into()) },
+        Mount { source: "".into(), target: "/workspace".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some("size=256m,uid=1001,gid=1001,mode=0775".into()) },
+    ]
+}
+
+pub fn validate_path(path: &str, config: &Config) -> Result<(), String> {
     if !path.starts_with('/') {
         return Err("Path must be absolute".into());
     }
