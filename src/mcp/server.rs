@@ -43,14 +43,19 @@ async fn register_task_create(
 
     server.register_tool(
         ToolBuilder::new("task_create")
-            .description("Create a new task sandbox with a hardened Docker container")
+            .description("Create a new task sandbox with a hardened Docker container. Network is disabled by default; pass network='bridge' only when the task needs package installs or git clone.")
             .schema(json!({
                 "type": "object",
                 "properties": {
                     "taskId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$" },
                     "name": { "type": "string" },
                     "owner": { "type": "string" },
-                    "image": { "type": "string" }
+                    "image": { "type": "string" },
+                    "network": {
+                        "type": "string",
+                        "enum": ["none", "bridge"],
+                        "description": "Network mode. 'none' (default): no network access. 'bridge': outbound internet for package installs (npm install, git clone, pip install)."
+                    }
                 },
                 "required": ["taskId", "name"]
             }))
@@ -70,6 +75,11 @@ async fn register_task_create(
                     let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("task");
                     let owner = args.get("owner").and_then(|v| v.as_str());
                     let image = args.get("image").and_then(|v| v.as_str()).unwrap_or("opencode-sandbox-developer:latest");
+                    let network_mode = args.get("network").and_then(|v| v.as_str()).unwrap_or("none");
+
+                    if !is_valid_network_mode(network_mode) {
+                        return Ok(CallToolResult::error("Invalid network mode: allowed values are 'none' and 'bridge'."));
+                    }
 
                     if !cfg.allowed_images.iter().any(|img| img == image) {
                         return Ok(CallToolResult::error("Image not allowed. Use a pre-approved sandbox image."));
@@ -94,7 +104,7 @@ async fn register_task_create(
                         name: format!("armor-{}", task.id),
                         image: image.to_string(),
                         command: Some(vec!["sleep".into(), "infinity".into()]),
-                        network_mode: Some("none".into()),
+                        network_mode: Some(network_mode.into()),
                         memory_limit: Some(cfg.container_memory_mb * 1024 * 1024),
                         cpu_shares: Some(cfg.container_cpu_shares),
                         pids_limit: Some(cfg.container_pids_limit),
@@ -107,7 +117,13 @@ async fn register_task_create(
                     };
 
                     let container_id = match rt.create_container(&container_config).await {
-                        Ok(id) => id,
+                        Ok(id) => {
+                            if network_mode == "bridge" {
+                                warn!("Task {} created with network access (bridge)", task_id);
+                                reg.add_event(task_id, "network_enabled", "Container created with bridge networking").await.ok();
+                            }
+                            id
+                        }
                         Err(e) => {
                             error!("Container creation failed for task {}: {}", task_id, e);
                             let _ = lc.delete_task(task_id).await;
@@ -490,6 +506,10 @@ pub fn default_task_mounts() -> Vec<Mount> {
     ]
 }
 
+pub fn is_valid_network_mode(mode: &str) -> bool {
+    matches!(mode, "none" | "bridge")
+}
+
 pub fn validate_path(path: &str, config: &Config) -> Result<(), String> {
     if !path.starts_with('/') {
         return Err("Path must be absolute".into());
@@ -506,7 +526,7 @@ pub fn validate_path(path: &str, config: &Config) -> Result<(), String> {
     Ok(())
 }
 
-fn base64_encode(input: &str) -> String {
+pub fn base64_encode(input: &str) -> String {
     use std::fmt::Write;
     let mut result = String::with_capacity((input.len() + 2) / 3 * 4);
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
