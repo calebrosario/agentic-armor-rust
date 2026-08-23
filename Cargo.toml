@@ -31,4 +31,5 @@ async-trait = "0.1"
 libc = "0.2"
 
 [dev-dependencies]
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 tokio-test = "0.4"

@@ -1,11 +1,11 @@
-use agentic_armor::ArmorContainerConfig;
+use agentic_armor::{ArmorContainerConfig, NetworkConfig};
 
 #[test]
 fn test_container_config_defaults() {
     let config = ArmorContainerConfig::default();
     assert_eq!(config.image, "opencode-sandbox-base:latest");
     assert!(config.command.is_none());
-    assert!(config.network_mode.is_none());
+    assert_eq!(config.network, NetworkConfig::None);
     assert!(config.mounts.is_none());
     assert!(config.readonly_rootfs.is_none());
     assert!(config.cap_drop.is_none());
@@ -17,7 +17,9 @@ fn test_container_config_builder_pattern() {
         name: "test".into(),
         image: "alpine:latest".into(),
         command: Some(vec!["sleep".into(), "10".into()]),
-        network_mode: Some("none".into()),
+        network: NetworkConfig::Bridge {
+            network: "armor-t1".into(),
+        },
         memory_limit: Some(512 * 1024 * 1024),
         cpu_shares: Some(1024),
         pids_limit: Some(100),
@@ -29,7 +31,12 @@ fn test_container_config_builder_pattern() {
     assert_eq!(config.name, "test");
     assert_eq!(config.image, "alpine:latest");
     assert_eq!(config.command.as_ref().unwrap().len(), 2);
-    assert_eq!(config.network_mode.as_ref().unwrap(), "none");
+    assert_eq!(
+        config.network,
+        NetworkConfig::Bridge {
+            network: "armor-t1".into()
+        }
+    );
 }
 
 #[test]
@@ -62,6 +69,7 @@ fn test_exec_result_serialization() {
         exit_code: 0,
         stdout: "hello\n".into(),
         stderr: "".into(),
+        notes: vec![],
         duration_ms: 42,
     };
 
@@ -69,5 +77,6 @@ fn test_exec_result_serialization() {
     let back: agentic_armor::ExecResult = serde_json::from_str(&json).unwrap();
     assert_eq!(back.exit_code, 0);
     assert_eq!(back.stdout, "hello\n");
+    assert!(back.notes.is_empty());
     assert_eq!(back.duration_ms, 42);
 }
