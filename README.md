@@ -167,9 +167,19 @@ Every container gets:
 
 ```bash
 cargo build
-cargo test          # 16 tests
+cargo test          # 31 tests
 cargo run           # Run test container lifecycle
 ```
+
+### Adversarial Testing
+
+12 automated scenarios where a real agent (OpenCode + LLM) is instructed to escape the sandbox, exfiltrate secrets, or abuse the system — with every attempt verified contained and logged: [docs/ADVERSARIAL-TESTING.md](docs/ADVERSARIAL-TESTING.md)
+
+```bash
+python3 tests/adversarial/runner.py --all   # full suite (~1h), results in tests/adversarial/reports/
+```
+
+Every `task_exec` attempt is persisted to the audit trail (`exec_logged` events, surfaced by `task_logs`).
 
 ---
 
