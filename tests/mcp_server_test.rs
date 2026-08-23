@@ -161,6 +161,14 @@ fn upload_empty_content_creates_truncated_file() {
     let cmds = upload_chunk_commands("/tmp/empty.txt", "");
     assert_eq!(cmds.len(), 1);
     assert!(cmds[0].contains(": > '/tmp/empty.txt'"));
+    assert!(cmds[0].contains("[ ! -L '/tmp/empty.txt' ]"), "must refuse writing through a final-component symlink");
+}
+
+#[test]
+fn upload_first_chunk_guards_final_symlink() {
+    let cmds = upload_chunk_commands("/workspace/f.txt", &base64_encode("data"));
+    assert!(cmds[0].contains("[ ! -L '/workspace/f.txt' ]"));
+    assert!(!cmds[1].contains("[ ! -L"), "guard only needed on first chunk");
 }
 
 #[test]

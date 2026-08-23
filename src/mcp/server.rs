@@ -578,7 +578,10 @@ async fn resolve_path_in_container(
     let script = if follow_final {
         format!("readlink -f '{}'", path)
     } else {
-        format!("echo \"$(readlink -f \"$(dirname '{}')\")/$(basename '{}')\"", path, path)
+        format!(
+            "p=\"$(dirname '{}')\"; tail=''; while [ \"$p\" != / ] && [ ! -e \"$p\" ]; do tail=\"/$(basename \"$p\")$tail\"; p=$(dirname \"$p\"); done; echo \"$(readlink -f \"$p\")$tail/$(basename '{}')\"",
+            path, path
+        )
     };
     let result = rt
         .exec_in_container(container_id, &ExecRequest {
@@ -597,8 +600,12 @@ async fn resolve_path_in_container(
 const UPLOAD_CHUNK_BYTES: usize = 48 * 1024;
 
 pub fn upload_chunk_commands(resolved_path: &str, b64: &str) -> Vec<String> {
+    let symlink_guard = format!(
+        "[ ! -L '{}' ] || {{ echo 'refusing to write through symlink'; exit 1; }}",
+        resolved_path
+    );
     if b64.is_empty() {
-        return vec![format!(": > '{}'", resolved_path)];
+        return vec![format!("{} && : > '{}'", symlink_guard, resolved_path)];
     }
     b64.as_bytes()
         .chunks(UPLOAD_CHUNK_BYTES)
@@ -606,7 +613,8 @@ pub fn upload_chunk_commands(resolved_path: &str, b64: &str) -> Vec<String> {
         .map(|(i, chunk)| {
             let redirect = if i == 0 { ">" } else { ">>" };
             format!(
-                "mkdir -p \"$(dirname '{}')\" && printf %s '{}' | base64 -d {} '{}' || {{ rm -f '{}'; exit 1; }}",
+                "{} && mkdir -p \"$(dirname '{}')\" && printf %s '{}' | base64 -d {} '{}' || {{ rm -f '{}'; exit 1; }}",
+                if i == 0 { &symlink_guard } else { "true" },
                 resolved_path,
                 std::str::from_utf8(chunk).unwrap_or(""),
                 redirect,
