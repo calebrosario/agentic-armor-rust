@@ -601,7 +601,7 @@ const UPLOAD_CHUNK_BYTES: usize = 48 * 1024;
 
 pub fn upload_chunk_commands(resolved_path: &str, b64: &str) -> Vec<String> {
     let symlink_guard = format!(
-        "[ ! -L '{}' ] || {{ echo 'refusing to write through symlink'; exit 1; }}",
+        "[ ! -L '{}' ] || {{ echo 'refusing to write through symlink' >&2; exit 1; }}",
         resolved_path
     );
     if b64.is_empty() {
