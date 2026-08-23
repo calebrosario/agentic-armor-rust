@@ -16,7 +16,7 @@ pub async fn start(
     let server = Arc::new(McpServer::new("agentic-armor", "0.4.0"));
 
     register_task_create(&server, &config, &runtime, &registry, &lifecycle).await;
-    register_task_exec(&server, &runtime, &lifecycle).await;
+    register_task_exec(&server, &runtime, &lifecycle, &registry).await;
     register_task_upload(&server, &runtime, &lifecycle, &config).await;
     register_task_download(&server, &runtime, &lifecycle, &config).await;
     register_task_list(&server, &registry).await;
@@ -163,9 +163,11 @@ async fn register_task_exec(
     server: &Arc<McpServer>,
     runtime: &Arc<dyn ContainerRuntime>,
     lifecycle: &Arc<TaskLifecycle>,
+    registry: &Arc<TaskRegistry>,
 ) {
     let rt = runtime.clone();
     let lc = lifecycle.clone();
+    let reg = registry.clone();
 
     server.register_tool(
         ToolBuilder::new("task_exec")
@@ -182,6 +184,7 @@ async fn register_task_exec(
             .handler(move |args| {
                 let rt = rt.clone();
                 let lc = lc.clone();
+                let reg = reg.clone();
                 async move {
                     let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
                     let command: Vec<String> = args.get("command")
@@ -190,9 +193,17 @@ async fn register_task_exec(
                         .unwrap_or_default();
                     let timeout_ms = args.get("timeout").and_then(|v| v.as_u64());
 
+                    let audit_cmd: String = {
+                        let joined = command.join(" ");
+                        joined.chars().take(512).collect()
+                    };
+
                     let container_id = match lc.get_container_id(task_id).await {
                         Ok(id) => id,
-                        Err(e) => return Ok(CallToolResult::error(format!("Cannot find container: {}", e))),
+                        Err(e) => {
+                            reg.add_event(task_id, "exec_logged", &format!("exec rejected (task not found): {}", audit_cmd)).await.ok();
+                            return Ok(CallToolResult::error(format!("Cannot find container: {}", e)));
+                        }
                     };
 
                     let result = match rt.exec_in_container(&container_id, &ExecRequest {
@@ -201,8 +212,13 @@ async fn register_task_exec(
                         ..Default::default()
                     }).await {
                         Ok(r) => r,
-                        Err(e) => return Ok(CallToolResult::error(format!("Exec failed: {}", e))),
+                        Err(e) => {
+                            reg.add_event(task_id, "exec_logged", &format!("exec error ({}): {}", e, audit_cmd)).await.ok();
+                            return Ok(CallToolResult::error(format!("Exec failed: {}", e)));
+                        }
                     };
+
+                    reg.add_event(task_id, "exec_logged", &format!("exec exit={} durMs={}: {}", result.exit_code, result.duration_ms, audit_cmd)).await.ok();
 
                     Ok(CallToolResult::text(json!({
                         "success": result.exit_code == 0,
