@@ -34,7 +34,7 @@ async fn main() -> Result<(), ArmorError> {
 
     let _ = std::fs::create_dir_all("./data");
 
-    let pool = sqlx::SqlitePool::connect("sqlite://./data/agentic_armor.db?mode=rwc")
+    let pool = sqlx::SqlitePool::connect("sqlite://./data/agentic_armor.db?mode=rwc&busy_timeout=5000")
         .await
         .map_err(|e| ArmorError::Database(e.to_string()))?;
 

@@ -514,10 +514,17 @@ async fn register_task_delete(server: &Arc<McpServer>, runtime: &Arc<dyn Contain
                         if let Err(e) = rt.destroy_container(container_id).await {
                             warn!("Failed to destroy container {} for task {}: {} — container may still be running on the host", container_id, task_id, e);
                         }
-                        if let Err(e) = rt.remove_network(&task_network_name(task_id)).await {
-                            if !e.to_string().to_lowercase().contains("no such network") {
-                                warn!("Failed to remove network for task {}: {}", task_id, e);
+                    } else {
+                        let orphan_name = format!("armor-{}", task_id);
+                        if let Err(e) = rt.destroy_container(&orphan_name).await {
+                            if !e.to_string().to_lowercase().contains("no such container") {
+                                warn!("Failed to clean up potential orphan container {}: {}", orphan_name, e);
                             }
+                        }
+                    }
+                    if let Err(e) = rt.remove_network(&task_network_name(task_id)).await {
+                        if !e.to_string().to_lowercase().contains("no such network") {
+                            warn!("Failed to remove network for task {}: {}", task_id, e);
                         }
                     }
 
