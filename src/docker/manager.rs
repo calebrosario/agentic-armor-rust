@@ -25,6 +25,15 @@ pub fn task_network_name(task_id: &str) -> String {
     format!("armor-{}", task_id)
 }
 
+pub fn is_pid_exhaustion_error(err: &ArmorError) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("procready not received")
+        || msg.contains("cannot fork")
+        || msg.contains("can't fork")
+        || msg.contains("resource temporarily unavailable")
+        || msg.contains("no space left on device")
+}
+
 #[async_trait]
 pub trait ContainerRuntime: Send + Sync {
     async fn ping(&self) -> ArmorResult<()>;
@@ -132,19 +141,38 @@ impl BollardRuntime {
     }
 
     fn connect(socket: &str) -> ArmorResult<Docker> {
-        if std::path::Path::new(socket).exists() {
+        let docker = if std::path::Path::new(socket).exists() {
             info!("Connecting to container runtime socket: {}", socket);
             Docker::connect_with_socket(
                 socket,
                 120,
                 bollard::API_DEFAULT_VERSION,
             )
-            .map_err(|e| ArmorError::DockerConnectionFailed(format!("{}: {}", socket, e)))
+            .map_err(|e| ArmorError::DockerConnectionFailed(format!("{}: {}", socket, e)))?
         } else {
             warn!("Socket not found: {} — trying default connection", socket);
             Docker::connect_with_local_defaults()
-                .map_err(|e| ArmorError::DockerConnectionFailed(e.to_string()))
+                .map_err(|e| ArmorError::DockerConnectionFailed(e.to_string()))?
+        };
+        if let Ok(meta) = std::fs::metadata(socket) {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = meta.permissions().mode();
+            let owner_writable = mode & 0o200 != 0;
+            let accessible = std::fs::File::open(socket).is_ok();
+            if accessible && !owner_writable {
+                warn!(
+                    "Socket {} is reachable but this user cannot write to it (mode {:o}) — \
+                     container runtime calls will fail. Is the user in the docker/podman group?",
+                    socket,
+                    mode & 0o777
+                );
+            }
+            if !accessible {
+                warn!("Socket {} exists but cannot be opened by this user — \
+                       check group membership (docker/podman) or socket permissions", socket);
+            }
         }
+        Ok(docker)
     }
 }
 

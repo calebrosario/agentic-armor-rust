@@ -2,7 +2,7 @@ use agentic_armor::{
     ArmorError, BollardRuntime, Config, ContainerRuntime, TaskLifecycle, TaskRegistry,
 };
 use std::sync::Arc;
-use tracing::info;
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<(), ArmorError> {
@@ -21,6 +21,16 @@ async fn main() -> Result<(), ArmorError> {
 
     let runtime: Arc<dyn ContainerRuntime> = Arc::new(BollardRuntime::auto_detect(config.clone())?);
     info!("Container runtime: {}", runtime.runtime_name());
+    if let Err(e) = runtime.ping().await {
+        error!(
+            "Cannot reach the {} daemon: {}. \
+             If this is a permissions issue, add the current user to the docker group \
+             (sudo usermod -aG docker $USER, then re-login) or set DOCKER_SOCKET/PODMAN_SOCKET.",
+            runtime.runtime_name(),
+            e
+        );
+        return Err(e);
+    }
 
     let _ = std::fs::create_dir_all("./data");
 
