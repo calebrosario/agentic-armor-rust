@@ -1,5 +1,16 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkConfig {
+    #[default]
+    None,
+    Bridge {
+        network: String,
+    },
+    Host,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArmorContainerConfig {
     pub name: String,
@@ -8,8 +19,7 @@ pub struct ArmorContainerConfig {
     pub working_dir: Option<String>,
     pub env: Option<Vec<String>>,
     pub mounts: Option<Vec<Mount>>,
-    pub network_mode: Option<String>,
-    pub network_name: Option<String>,
+    pub network: NetworkConfig,
     pub memory_limit: Option<i64>,
     pub cpu_shares: Option<i64>,
     pub pids_limit: Option<i64>,
@@ -29,8 +39,7 @@ impl Default for ArmorContainerConfig {
             working_dir: None,
             env: None,
             mounts: None,
-            network_mode: None,
-            network_name: None,
+            network: NetworkConfig::None,
             memory_limit: None,
             cpu_shares: None,
             pids_limit: None,
@@ -59,6 +68,8 @@ pub struct ExecResult {
     pub exit_code: i64,
     pub stdout: String,
     pub stderr: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
     pub duration_ms: u64,
 }
 

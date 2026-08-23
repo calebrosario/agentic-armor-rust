@@ -1,18 +1,18 @@
 use agentic_armor::task::{TaskLifecycle, TaskRegistry};
 use sqlx::sqlite::SqlitePoolOptions;
 
-async fn fresh_registry() -> TaskRegistry {
+async fn fresh_registry_with_pool() -> (TaskRegistry, sqlx::SqlitePool) {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
         .await
         .expect("in-memory pool");
-    let registry = TaskRegistry::new(pool);
+    let registry = TaskRegistry::new(pool.clone());
     registry.migrate().await.expect("migrate");
-    registry
+    (registry, pool)
 }
 
-async fn legacy_registry_with_row() -> TaskRegistry {
+async fn legacy_registry_with_row() -> (TaskRegistry, sqlx::SqlitePool) {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -55,9 +55,9 @@ async fn legacy_registry_with_row() -> TaskRegistry {
         .await
         .expect("legacy event row");
 
-    let registry = TaskRegistry::new(pool);
+    let registry = TaskRegistry::new(pool.clone());
     registry.migrate().await.expect("migrate legacy");
-    registry
+    (registry, pool)
 }
 
 async fn table_ddl(pool: &sqlx::SqlitePool, table: &str) -> String {
@@ -70,15 +70,15 @@ async fn table_ddl(pool: &sqlx::SqlitePool, table: &str) -> String {
 
 #[tokio::test]
 async fn fresh_migrate_creates_append_only_events() {
-    let reg = fresh_registry().await;
-    let ddl = table_ddl(reg.pool(), "task_events").await;
+    let (reg, pool) = fresh_registry_with_pool().await;
+    let ddl = table_ddl(&pool, "task_events").await;
     assert!(!ddl.contains("CASCADE"), "fresh schema must not cascade: {}", ddl);
 }
 
 #[tokio::test]
 async fn legacy_migration_preserves_rows_and_removes_cascade() {
-    let reg = legacy_registry_with_row().await;
-    let ddl = table_ddl(reg.pool(), "task_events").await;
+    let (reg, pool) = legacy_registry_with_row().await;
+    let ddl = table_ddl(&pool, "task_events").await;
     assert!(!ddl.contains("CASCADE"), "legacy CASCADE must be removed, got: {}", ddl);
 
     let events = reg.get_logs("legacy-1", 100).await.expect("logs");
@@ -88,7 +88,7 @@ async fn legacy_migration_preserves_rows_and_removes_cascade() {
 
 #[tokio::test]
 async fn legacy_migration_is_idempotent() {
-    let reg = legacy_registry_with_row().await;
+    let (reg, _pool) = legacy_registry_with_row().await;
     reg.migrate().await.expect("second migrate");
     let events = reg.get_logs("legacy-1", 100).await.expect("logs");
     assert_eq!(events.len(), 1, "no duplication on re-migrate");
@@ -96,7 +96,7 @@ async fn legacy_migration_is_idempotent() {
 
 #[tokio::test]
 async fn events_survive_task_deletion() {
-    let reg = fresh_registry().await;
+    let (reg, _pool) = fresh_registry_with_pool().await;
     reg.create("t1", "task", None).await.expect("create");
     reg.add_event("t1", "exec_logged", "exec exit=0: echo hi").await.expect("event");
 
@@ -110,7 +110,7 @@ async fn events_survive_task_deletion() {
 
 #[tokio::test]
 async fn delete_missing_task_is_ok_and_writes_no_phantom_event() {
-    let reg = fresh_registry().await;
+    let (reg, _pool) = fresh_registry_with_pool().await;
     let lifecycle = TaskLifecycle::new(std::sync::Arc::new(reg.clone()));
     lifecycle.delete_task("never-existed").await.expect("delete of missing task must be Ok");
 

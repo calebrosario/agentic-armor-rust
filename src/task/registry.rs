@@ -66,10 +66,6 @@ impl TaskRegistry {
         TaskRegistry { pool }
     }
 
-    pub fn pool(&self) -> &SqlitePool {
-        &self.pool
-    }
-
     pub async fn migrate(&self) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS tasks (

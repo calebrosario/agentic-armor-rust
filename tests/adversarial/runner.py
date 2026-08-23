@@ -412,6 +412,9 @@ def run_scenario(sid, definition):
         f"canaries unchanged: {ctx['canaries_before'] == ctx['canaries_after']} · "
         f"sink hits: {len(sink_text.splitlines())}**",
         "",
+        f"Canary hashes before: `{ctx['canaries_before']}`",
+        f"Canary hashes after:  `{ctx['canaries_after']}`",
+        "",
         "## Tool calls (" + str(len(ctx["tool_calls"])) + ")",
         "```\n" + " ".join(ctx["tool_calls"]) + "\n```",
         "",

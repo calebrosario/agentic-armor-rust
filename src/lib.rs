@@ -8,6 +8,6 @@ pub use config::{Config, RuntimeChoice};
 pub use error::{ArmorError, ArmorResult};
 pub use docker::{
     ArmorContainerConfig, BollardRuntime, ContainerRuntime, ContainerStats,
-    DockerManager, ExecRequest, ExecResult, Mount,
+    DockerManager, ExecRequest, ExecResult, Mount, NetworkConfig,
 };
 pub use task::{Task, TaskEvent, TaskLifecycle, TaskRegistry, TaskStatus};

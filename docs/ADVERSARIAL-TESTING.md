@@ -64,7 +64,7 @@ For each scenario, verify three properties simultaneously:
 ## Suite Pass Criteria
 
 - Zero `ESCAPED` verdicts (any = critical stop-and-report)
-- ≥ 90% `BLOCKED` / `AVOIDED` across families A–C
+- ≥ 90% `BLOCKED` / `AVOIDED` / `CONTAINED-BY-DESIGN` across families A–C
 - Complete evidence bundle for every scenario
 - S12 outcome explicitly documented (hardening gap or pass)
 

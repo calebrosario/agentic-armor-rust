@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::docker::{is_pid_exhaustion_error, task_network_name, ArmorContainerConfig, ContainerRuntime, ExecRequest, Mount};
+use crate::docker::{is_pid_exhaustion_error, task_network_name, ArmorContainerConfig, ContainerRuntime, ExecRequest, Mount, NetworkConfig};
 use crate::error::{ArmorError, ArmorResult};
 use crate::task::{TaskLifecycle, TaskRegistry};
 use mcp_sdk::{CallToolResult, McpServer, StdioTransport, ToolBuilder};
@@ -116,12 +116,20 @@ async fn register_task_create(
                         }
                     }
 
+                    let network = match (&per_task_network, network_mode) {
+                        (Some(net), "bridge") => NetworkConfig::Bridge { network: net.clone() },
+                        (None, "none") => NetworkConfig::None,
+                        _ => {
+                            let _ = lc.delete_task(task_id).await;
+                            return Ok(CallToolResult::error("Invalid network mode: allowed values are 'none' and 'bridge'."));
+                        }
+                    };
+
                     let container_config = ArmorContainerConfig {
                         name: format!("armor-{}", task.id),
                         image: image.to_string(),
                         command: Some(vec!["sleep".into(), "infinity".into()]),
-                        network_mode: Some(network_mode.into()),
-                        network_name: per_task_network.clone(),
+                        network,
                         memory_limit: Some(cfg.container_memory_mb * 1024 * 1024),
                         cpu_shares: Some(cfg.container_cpu_shares),
                         pids_limit: Some(cfg.container_pids_limit),
@@ -273,11 +281,7 @@ async fn register_task_exec(
                         ""
                     };
 
-                    let stderr = if fork_hint.is_empty() {
-                        result.stderr
-                    } else {
-                        format!("{}{}", result.stderr, fork_hint)
-                    };
+                    let stderr = render_exec_stderr(&result.stderr, &result.notes, fork_hint);
 
                     Ok(CallToolResult::text(json!({
                         "success": result.exit_code == 0,
@@ -599,11 +603,15 @@ async fn register_task_logs(server: &Arc<McpServer>, registry: &Arc<TaskRegistry
     ).await;
 }
 
+pub fn task_tmpfs_options(size_mb: usize) -> String {
+    format!("size={}m,uid=1001,gid=1001,mode=0775", size_mb)
+}
+
 pub fn default_task_mounts() -> Vec<Mount> {
     vec![
-        Mount { source: "".into(), target: "/tmp".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some("size=64m,uid=1001,gid=1001,mode=0775".into()) },
-        Mount { source: "".into(), target: "/home/opencode".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some("size=64m,uid=1001,gid=1001,mode=0775".into()) },
-        Mount { source: "".into(), target: "/workspace".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some("size=256m,uid=1001,gid=1001,mode=0775".into()) },
+        Mount { source: "".into(), target: "/tmp".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some(task_tmpfs_options(64)) },
+        Mount { source: "".into(), target: "/home/opencode".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some(task_tmpfs_options(64)) },
+        Mount { source: "".into(), target: "/workspace".into(), mount_type: "tmpfs".into(), read_only: None, tmpfs_options: Some(task_tmpfs_options(256)) },
     ]
 }
 
@@ -661,6 +669,18 @@ pub fn base64_encode(input: &str) -> String {
 
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+pub fn render_exec_stderr(stderr: &str, notes: &[String], fork_hint: &str) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(3);
+    if !stderr.is_empty() {
+        parts.push(stderr.to_string());
+    }
+    parts.extend(notes.iter().cloned());
+    if !fork_hint.is_empty() {
+        parts.push(fork_hint.trim().to_string());
+    }
+    parts.join("\n")
 }
 
 pub fn audit_command(command: &[String]) -> String {

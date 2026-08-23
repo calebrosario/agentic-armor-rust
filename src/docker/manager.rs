@@ -25,21 +25,26 @@ pub fn task_network_name(task_id: &str) -> String {
     format!("armor-{}", task_id)
 }
 
-pub fn resolve_network_mode(mode: &str, network_name: Option<&str>) -> ArmorResult<String> {
-    match (mode, network_name) {
-        ("bridge", Some(name)) => {
-            if !is_valid_task_network_name(name) {
+pub fn docker_network_mode(config: &NetworkConfig, allow_host: bool) -> ArmorResult<String> {
+    match config {
+        NetworkConfig::None => Ok("none".into()),
+        NetworkConfig::Bridge { network } => {
+            if !is_valid_task_network_name(network) {
                 return Err(ArmorError::InvalidNetworkMode(format!(
                     "network_name must be 'armor-<taskId>' (alphanumeric/_/-), got '{}'",
-                    name
+                    network
                 )));
             }
-            Ok(name.to_string())
+            Ok(network.clone())
         }
-        ("none", Some(_)) => Err(ArmorError::InvalidNetworkMode(
-            "network_name cannot be combined with network mode 'none'".into(),
-        )),
-        (m, _) => Ok(m.to_string()),
+        NetworkConfig::Host => {
+            if allow_host {
+                warn!("Host network mode allowed via ALLOW_HOST_NETWORK=true");
+                Ok("host".into())
+            } else {
+                Err(ArmorError::InvalidNetworkMode("host".into()))
+            }
+        }
     }
 }
 
@@ -314,18 +319,11 @@ impl ContainerRuntime for BollardRuntime {
         }
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        let mut stderr = String::from_utf8_lossy(&stderr_buf).to_string();
-        for note in &exec_notes {
-            if !stderr.is_empty() {
-                stderr.push('\n');
-            }
-            stderr.push_str(note);
-        }
-
         Ok(ExecResult {
             exit_code,
             stdout: String::from_utf8_lossy(&stdout_buf).to_string(),
-            stderr,
+            stderr: String::from_utf8_lossy(&stderr_buf).to_string(),
+            notes: exec_notes,
             duration_ms,
         })
     }
@@ -414,17 +412,7 @@ impl BollardRuntime {
             }
         }
 
-        let effective_network_mode = config.network_mode.clone().unwrap_or_else(|| "none".into());
-        let allowed = ["bridge", "none"];
-        if !allowed.contains(&effective_network_mode.as_str()) {
-            if effective_network_mode == "host" && self.config.allow_host_network {
-                warn!("Host network mode allowed via ALLOW_HOST_NETWORK=true");
-            } else {
-                return Err(ArmorError::InvalidNetworkMode(effective_network_mode));
-            }
-        }
-
-        let docker_network_mode = resolve_network_mode(&effective_network_mode, config.network_name.as_deref())?;
+        let network_mode = docker_network_mode(&config.network, self.config.allow_host_network)?;
 
         let memory = config.memory_limit
             .unwrap_or(self.config.container_memory_mb * 1024 * 1024)
@@ -443,7 +431,7 @@ impl BollardRuntime {
         let host_config = HostConfig {
             binds: if binds.is_empty() { None } else { Some(binds) },
             tmpfs: if tmpfs.is_empty() { None } else { Some(tmpfs) },
-            network_mode: Some(docker_network_mode),
+            network_mode: Some(network_mode),
             memory: Some(memory),
             cpu_shares: Some(cpu_shares),
             pids_limit: Some(pids_limit),

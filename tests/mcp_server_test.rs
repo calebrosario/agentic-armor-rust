@@ -237,16 +237,24 @@ fn audit_command_truncates_at_512_chars_on_char_boundary() {
 }
 
 #[test]
-fn resolve_network_mode_matrix() {
-    use agentic_armor::docker::resolve_network_mode;
-    assert_eq!(resolve_network_mode("bridge", Some("armor-t1")).unwrap(), "armor-t1");
-    assert_eq!(resolve_network_mode("bridge", None).unwrap(), "bridge");
-    assert_eq!(resolve_network_mode("none", None).unwrap(), "none");
-    assert!(resolve_network_mode("none", Some("armor-t1")).is_err(), "none + name rejected");
-    assert!(resolve_network_mode("bridge", Some("bridge")).is_err(), "shared bridge rejected");
-    assert!(resolve_network_mode("bridge", Some("armor-")).is_err(), "empty suffix rejected");
-    assert!(resolve_network_mode("bridge", Some("armor-a b")).is_err(), "space rejected");
-    assert!(resolve_network_mode("host", None).is_ok(), "host handled by earlier allowlist layer");
+fn docker_network_mode_matrix() {
+    use agentic_armor::docker::docker_network_mode;
+    use agentic_armor::docker::NetworkConfig;
+    assert_eq!(docker_network_mode(&NetworkConfig::None, false).unwrap(), "none");
+    assert_eq!(
+        docker_network_mode(&NetworkConfig::Bridge { network: "armor-t1".into() }, false).unwrap(),
+        "armor-t1"
+    );
+    assert!(docker_network_mode(&NetworkConfig::Bridge { network: "bridge".into() }, false).is_err(),
+        "shared bridge rejected at type level");
+    assert!(docker_network_mode(&NetworkConfig::Bridge { network: "armor-".into() }, false).is_err(),
+        "empty suffix rejected");
+    assert!(docker_network_mode(&NetworkConfig::Bridge { network: "armor-a b".into() }, false).is_err(),
+        "space rejected");
+    assert!(docker_network_mode(&NetworkConfig::Host, false).is_err(),
+        "host rejected without escape hatch");
+    assert_eq!(docker_network_mode(&NetworkConfig::Host, true).unwrap(), "host",
+        "host allowed only via ALLOW_HOST_NETWORK");
 }
 
 #[test]
@@ -295,4 +303,17 @@ fn base64_decode_manual(s: &str) -> String {
         }
     }
     String::from_utf8(buf).expect("utf8")
+}
+
+#[test]
+fn render_exec_stderr_joins_parts_in_order() {
+    use agentic_armor::mcp::server::render_exec_stderr;
+    assert_eq!(render_exec_stderr("", &[], ""), "");
+    assert_eq!(render_exec_stderr("boom", &[], ""), "boom");
+    assert_eq!(
+        render_exec_stderr("boom", &["[agentic-armor] exec timed out".into()], ""),
+        "boom\n[agentic-armor] exec timed out"
+    );
+    assert_eq!(render_exec_stderr("", &["note".into()], "  — hint  "),
+               "note\n— hint", "fork hint trimmed, leading stderr gap skipped");
 }
