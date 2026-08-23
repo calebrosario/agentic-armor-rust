@@ -146,7 +146,6 @@ Podman rootless (if socket compromised):
 | `CONTAINER_RUNTIME` | `auto` | `docker`, `podman`, or `auto` |
 | `DOCKER_SOCKET` | `/var/run/docker.sock` | Docker socket path |
 | `PODMAN_SOCKET` | Auto-detected | Podman socket path |
-| `DATABASE_URL` | `postgresql://localhost:5433/agentic_armor` | PostgreSQL connection |
 | `CONTAINER_MEMORY_MB` | `512` | Default memory limit per container |
 | `CONTAINER_CPU_SHARES` | `1024` | Default CPU shares |
 | `CONTAINER_PIDS_LIMIT` | `100` | Default PID limit |
@@ -254,10 +253,7 @@ Add to `~/.claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "agentic-armor": {
-      "command": "/path/to/agentic-armor-rust/target/release/agentic-armor",
-      "env": {
-        "DATABASE_URL": "postgresql://opencode:opencode@localhost:5433/agentic_armor"
-      }
+      "command": "/path/to/agentic-armor-rust/target/release/agentic-armor"
     }
   }
 }
@@ -285,10 +281,7 @@ Add to `.cursor/mcp.json` in your project root:
 {
   "mcpServers": {
     "agentic-armor": {
-      "command": "/path/to/agentic-armor-rust/target/release/agentic-armor",
-      "env": {
-        "DATABASE_URL": "postgresql://opencode:opencode@localhost:5433/agentic_armor"
-      }
+      "command": "/path/to/agentic-armor-rust/target/release/agentic-armor"
     }
   }
 }
@@ -304,10 +297,7 @@ Add to Windsurf Settings → MCP Servers, or edit the Windsurf config file:
 {
   "mcpServers": {
     "agentic-armor": {
-      "command": "/path/to/agentic-armor-rust/target/release/agentic-armor",
-      "env": {
-        "DATABASE_URL": "postgresql://opencode:opencode@localhost:5433/agentic_armor"
-      }
+      "command": "/path/to/agentic-armor-rust/target/release/agentic-armor"
     }
   }
 }
@@ -341,10 +331,7 @@ Add to `~/.codex/config.json` (or `.codex/mcp.json` in project root):
 {
   "mcpServers": {
     "agentic-armor": {
-      "command": "/path/to/agentic-armor-rust/target/release/agentic-armor",
-      "env": {
-        "DATABASE_URL": "postgresql://opencode:opencode@localhost:5433/agentic_armor"
-      }
+      "command": "/path/to/agentic-armor-rust/target/release/agentic-armor"
     }
   }
 }
@@ -376,10 +363,7 @@ Add to VS Code `settings.json`:
 {
   "github.copilot.chat.mcp.servers": {
     "agentic-armor": {
-      "command": "/path/to/agentic-armor-rust/target/release/agentic-armor",
-      "env": {
-        "DATABASE_URL": "postgresql://opencode:opencode@localhost:5433/agentic_armor"
-      }
+      "command": "/path/to/agentic-armor-rust/target/release/agentic-armor"
     }
   }
 }
