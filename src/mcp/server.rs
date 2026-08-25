@@ -70,17 +70,32 @@ async fn register_task_create(
                 let lc = lc.clone();
                 let cfg = cfg.clone();
                 async move {
-                    let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let task_id = match arg_str(&args, "taskId") {
+                        Ok(v) => v,
+                        Err(e) => return Ok(CallToolResult::error(e)),
+                    };
 
                     if task_id.is_empty() || task_id.len() > 128 ||
                        !task_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
                         return Ok(CallToolResult::error("Invalid taskId: must match ^[a-zA-Z0-9_-]{1,128}$"));
                     }
 
-                    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("task");
-                    let owner = args.get("owner").and_then(|v| v.as_str());
-                    let image = args.get("image").and_then(|v| v.as_str()).unwrap_or("opencode-sandbox-developer:latest");
-                    let network_mode = args.get("network").and_then(|v| v.as_str()).unwrap_or("none");
+                    let name = match arg_opt_str(&args, "name") {
+                        Ok(v) => v.unwrap_or("task"),
+                        Err(e) => return Ok(CallToolResult::error(e)),
+                    };
+                    let owner = match arg_opt_str(&args, "owner") {
+                        Ok(v) => v,
+                        Err(e) => return Ok(CallToolResult::error(e)),
+                    };
+                    let image = match arg_opt_str(&args, "image") {
+                        Ok(v) => v.unwrap_or("opencode-sandbox-developer:latest"),
+                        Err(e) => return Ok(CallToolResult::error(e)),
+                    };
+                    let network_mode = match arg_opt_str(&args, "network") {
+                        Ok(v) => v.unwrap_or("none"),
+                        Err(e) => return Ok(CallToolResult::error(e)),
+                    };
 
                     if !is_valid_network_mode(network_mode) {
                         return Ok(CallToolResult::error("Invalid network mode: allowed values are 'none' and 'bridge'."));
@@ -136,6 +151,7 @@ async fn register_task_create(
                         no_new_privileges: Some(true),
                         cap_drop: Some(vec!["ALL".into()]),
                         user: Some("opencode".into()),
+                        env: None,
                         mounts: Some(default_task_mounts()),
                         ..Default::default()
                     };
@@ -208,12 +224,18 @@ async fn register_task_exec(
                 let lc = lc.clone();
                 let reg = reg.clone();
                 async move {
-                    let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
-                    let command: Vec<String> = args.get("command")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                        .unwrap_or_default();
-                    let timeout_ms = args.get("timeout").and_then(|v| v.as_u64());
+                    let task_id = match arg_str(&args, "taskId") {
+                        Ok(v) => v,
+                        Err(e) => return Ok(CallToolResult::error(e)),
+                    };
+                    let command = match arg_str_array(&args, "command") {
+                        Ok(v) => v,
+                        Err(e) => return Ok(CallToolResult::error(e)),
+                    };
+                    let timeout_ms = match arg_u64(&args, "timeout") {
+                        Ok(v) => v,
+                        Err(e) => return Ok(CallToolResult::error(e)),
+                    };
 
                     let audit_cmd = audit_command(&command);
 
@@ -294,9 +316,10 @@ async fn register_task_upload(
                 let lc = lc.clone();
                 let cfg = cfg.clone();
                 async move {
-                    let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
-                    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                    let (task_id, path, content) = match (arg_str(&args, "taskId"), arg_str(&args, "path"), arg_str(&args, "content")) {
+                        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+                        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return Ok(CallToolResult::error(e)),
+                    };
 
                     if let Err(e) = validate_path(path, &cfg) {
                         return Ok(CallToolResult::error(e));
@@ -370,8 +393,10 @@ async fn register_task_download(
                 let lc = lc.clone();
                 let cfg = cfg.clone();
                 async move {
-                    let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
-                    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    let (task_id, path) = match (arg_str(&args, "taskId"), arg_str(&args, "path")) {
+                        (Ok(a), Ok(b)) => (a, b),
+                        (Err(e), _) | (_, Err(e)) => return Ok(CallToolResult::error(e)),
+                    };
 
                     if let Err(e) = validate_path(path, &cfg) {
                         return Ok(CallToolResult::error(e));
@@ -435,11 +460,18 @@ async fn register_task_list(server: &Arc<McpServer>, registry: &Arc<TaskRegistry
                 .handler(move |args| {
                     let reg = reg.clone();
                     async move {
-                        let limit = args
-                            .get("limit")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(100)
-                            .clamp(1, 1000);
+                        let limit = match args.get("limit") {
+                            None => 100,
+                            Some(v) => match v.as_i64() {
+                                Some(n) => n.clamp(1, 1000),
+                                None => {
+                                    return Ok(CallToolResult::error(format!(
+                                        "argument 'limit' must be an integer, got {}",
+                                        type_name(v)
+                                    )))
+                                }
+                            },
+                        };
                         let tasks = match reg.list(limit).await {
                             Ok(t) => t,
                             Err(e) => {
@@ -487,7 +519,10 @@ async fn register_task_stop(
                     let rt = rt.clone();
                     let lc = lc.clone();
                     async move {
-                        let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
+                        let task_id = match arg_str(&args, "taskId") {
+                            Ok(v) => v,
+                            Err(e) => return Ok(CallToolResult::error(e)),
+                        };
 
                         if let Ok(container_id) = lc.get_container_id(task_id).await {
                             if let Err(e) = rt.stop_container(&container_id, 10).await {
@@ -536,7 +571,10 @@ async fn register_task_delete(
                 let rt = rt.clone();
                 let lc = lc.clone();
                 async move {
-                    let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
+                    let task_id = match arg_str(&args, "taskId") {
+                        Ok(v) => v,
+                        Err(e) => return Ok(CallToolResult::error(e)),
+                    };
 
                     let container_id = lc.get_container_id(task_id).await.ok();
                     let had_task = lc.get_task(task_id).await.is_ok();
@@ -591,12 +629,22 @@ async fn register_task_logs(server: &Arc<McpServer>, registry: &Arc<TaskRegistry
                 .handler(move |args| {
                     let reg = reg.clone();
                     async move {
-                        let task_id = args.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
-                        let limit = args
-                            .get("limit")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(100)
-                            .clamp(1, 1000);
+                        let task_id = match arg_str(&args, "taskId") {
+                            Ok(v) => v,
+                            Err(e) => return Ok(CallToolResult::error(e)),
+                        };
+                        let limit = match args.get("limit") {
+                            None => 100,
+                            Some(v) => match v.as_i64() {
+                                Some(n) => n.clamp(1, 1000),
+                                None => {
+                                    return Ok(CallToolResult::error(format!(
+                                        "argument 'limit' must be an integer, got {}",
+                                        type_name(v)
+                                    )))
+                                }
+                            },
+                        };
 
                         let logs = match reg.get_logs(task_id, limit).await {
                             Ok(l) => l,
@@ -705,6 +753,74 @@ pub fn validate_path(path: &str, config: &Config) -> Result<(), String> {
     }
     Ok(())
 }
+
+pub fn arg_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
+    match args.get(key) {
+        None => Err(format!("missing required argument: {}", key)),
+        Some(v) => v
+            .as_str()
+            .ok_or_else(|| format!("argument '{}' must be a string, got {}", key, type_name(v))),
+    }
+}
+
+pub fn arg_opt_str<'a>(args: &'a serde_json::Value, key: &str) -> Result<Option<&'a str>, String> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| format!("argument '{}' must be a string, got {}", key, type_name(v))),
+    }
+}
+
+pub fn arg_str_array(args: &serde_json::Value, key: &str) -> Result<Vec<String>, String> {
+    match args.get(key) {
+        None => Err(format!("missing required argument: {}", key)),
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| format!("argument '{}' must be an array, got {}", key, type_name(v)))
+            .and_then(|a| {
+                a.iter()
+                    .enumerate()
+                    .map(|(i, e)| {
+                        e.as_str().map(String::from).ok_or_else(|| {
+                            format!(
+                                "argument '{}'[{}] must be a string, got {}",
+                                key,
+                                i,
+                                type_name(e)
+                            )
+                        })
+                    })
+                    .collect()
+            }),
+    }
+}
+
+pub fn arg_u64(args: &serde_json::Value, key: &str) -> Result<Option<u64>, String> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(v) => v.as_u64().map(Some).ok_or_else(|| {
+            format!(
+                "argument '{}' must be a non-negative integer, got {}",
+                key,
+                type_name(v)
+            )
+        }),
+    }
+}
+
+pub fn type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
 
 async fn audit_event(reg: &TaskRegistry, task_id: &str, event_type: &str, message: &str) {
     if let Err(e) = reg.add_event(task_id, event_type, message).await {

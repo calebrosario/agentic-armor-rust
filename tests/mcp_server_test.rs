@@ -1,6 +1,7 @@
 use agentic_armor::config::Config;
 use agentic_armor::mcp::server::{
-    base64_encode, default_task_mounts, is_valid_network_mode, upload_chunk_commands, validate_path,
+    arg_opt_str, arg_str, arg_str_array, arg_u64, base64_encode, default_task_mounts,
+    is_valid_network_mode, upload_chunk_commands, validate_path,
 };
 
 fn mounts_by_target(target: &str) -> agentic_armor::Mount {
@@ -457,3 +458,69 @@ fn render_exec_stderr_joins_parts_in_order() {
         "fork hint trimmed, leading stderr gap skipped"
     );
 }
+
+// ---------------------------------------------------------------------------
+// JSON argument validation (type-confusion hardening)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn arg_str_requires_string_and_reports_actual_type() {
+    let args = serde_json::json!({ "taskId": 123, "owner": "agent-1" });
+    let err = arg_str(&args, "taskId").unwrap_err();
+    assert!(
+        err.contains("'taskId' must be a string, got number"),
+        "got: {err}"
+    );
+    assert_eq!(arg_str(&args, "owner").unwrap(), "agent-1");
+    let missing = arg_str(&args, "nope").unwrap_err();
+    assert!(
+        missing.contains("missing required argument: nope"),
+        "got: {missing}"
+    );
+}
+
+#[test]
+fn arg_opt_str_accepts_absent_but_rejects_wrong_type() {
+    let args = serde_json::json!({ "image": false });
+    assert!(arg_opt_str(&args, "absent").unwrap().is_none());
+    let err = arg_opt_str(&args, "image").unwrap_err();
+    assert!(
+        err.contains("'image' must be a string, got boolean"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn arg_u64_rejects_negative_float_and_string_but_accepts_u64() {
+    let args = serde_json::json!({ "a": -1, "b": 1.5, "c": "3000", "d": 3000 });
+    assert!(arg_u64(&args, "a")
+        .unwrap_err()
+        .contains("must be a non-negative integer"));
+    assert!(arg_u64(&args, "b")
+        .unwrap_err()
+        .contains("must be a non-negative integer"));
+    assert!(arg_u64(&args, "c")
+        .unwrap_err()
+        .contains("must be a non-negative integer"));
+    assert!(arg_u64(&args, "absent").unwrap().is_none());
+    assert_eq!(arg_u64(&args, "d").unwrap(), Some(3000));
+}
+
+#[test]
+fn arg_str_array_names_the_offending_index() {
+    let args = serde_json::json!({ "command": ["ls", "-la", 42] });
+    let err = arg_str_array(&args, "command").unwrap_err();
+    assert!(
+        err.contains("'command'[2] must be a string, got number"),
+        "got: {err}"
+    );
+    assert_eq!(
+        arg_str_array(&serde_json::json!({ "command": ["echo", "hi"] }), "command").unwrap(),
+        vec!["echo".to_string(), "hi".to_string()]
+    );
+    assert!(arg_str_array(&serde_json::json!({}), "command")
+        .unwrap_err()
+        .contains("missing required argument"));
+}
+
+
