@@ -56,6 +56,10 @@ async fn register_task_create(
                     "name": { "type": "string" },
                     "owner": { "type": "string" },
                     "image": { "type": "string" },
+                    "blockNpmScripts": {
+                        "type": "boolean",
+                        "description": "When true, sets npm_config_ignore_scripts=1 in the container — package lifecycle scripts (pre/postinstall) will not run. Recommended when installing untrusted dependencies."
+                    },
                     "network": {
                         "type": "string",
                         "enum": ["none", "bridge"],
@@ -91,6 +95,18 @@ async fn register_task_create(
                     let image = match arg_opt_str(&args, "image") {
                         Ok(v) => v.unwrap_or("opencode-sandbox-developer:latest"),
                         Err(e) => return Ok(CallToolResult::error(e)),
+                    };
+                    let block_npm_scripts = match args.get("blockNpmScripts") {
+                        None => false,
+                        Some(v) => match v.as_bool() {
+                            Some(b) => b,
+                            None => {
+                                return Ok(CallToolResult::error(format!(
+                                    "argument 'blockNpmScripts' must be a boolean, got {}",
+                                    type_name(v)
+                                )))
+                            }
+                        },
                     };
                     let network_mode = match arg_opt_str(&args, "network") {
                         Ok(v) => v.unwrap_or("none"),
@@ -151,13 +167,16 @@ async fn register_task_create(
                         no_new_privileges: Some(true),
                         cap_drop: Some(vec!["ALL".into()]),
                         user: Some("opencode".into()),
-                        env: None,
+                        env: npm_scripts_blocked_env(block_npm_scripts),
                         mounts: Some(default_task_mounts()),
                         ..Default::default()
                     };
 
                     let container_id = match rt.create_container(&container_config).await {
                         Ok(id) => {
+                            if block_npm_scripts {
+                                audit_event(&reg, task_id, "npm_scripts_blocked", "npm lifecycle scripts disabled via blockNpmScripts=true").await;
+                            }
                             if network_mode == "bridge" {
                                 warn!("Task {} created with network access (isolated bridge {})", task_id, task_network_name(task_id));
                                 audit_event(&reg, task_id, "network_enabled", "Container created with isolated per-task bridge networking").await;
@@ -821,6 +840,14 @@ pub fn type_name(v: &serde_json::Value) -> &'static str {
     }
 }
 
+/// Container env that disables npm lifecycle scripts (pre/postinstall) when requested.
+pub fn npm_scripts_blocked_env(blocked: bool) -> Option<Vec<String>> {
+    if blocked {
+        Some(vec!["NPM_CONFIG_IGNORE_SCRIPTS=1".into()])
+    } else {
+        None
+    }
+}
 
 async fn audit_event(reg: &TaskRegistry, task_id: &str, event_type: &str, message: &str) {
     if let Err(e) = reg.add_event(task_id, event_type, message).await {

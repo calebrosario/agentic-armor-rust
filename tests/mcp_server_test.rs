@@ -1,7 +1,7 @@
 use agentic_armor::config::Config;
 use agentic_armor::mcp::server::{
     arg_opt_str, arg_str, arg_str_array, arg_u64, base64_encode, default_task_mounts,
-    is_valid_network_mode, upload_chunk_commands, validate_path,
+    is_valid_network_mode, npm_scripts_blocked_env, upload_chunk_commands, validate_path,
 };
 
 fn mounts_by_target(target: &str) -> agentic_armor::Mount {
@@ -523,4 +523,12 @@ fn arg_str_array_names_the_offending_index() {
         .contains("missing required argument"));
 }
 
+// ---------------------------------------------------------------------------
+// blockNpmScripts env mapping
+// ---------------------------------------------------------------------------
 
+#[test]
+fn npm_scripts_blocked_env_maps_flag() {
+    assert_eq!(npm_scripts_blocked_env(true), Some(vec!["NPM_CONFIG_IGNORE_SCRIPTS=1".to_string()]));
+    assert_eq!(npm_scripts_blocked_env(false), None);
+}
