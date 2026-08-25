@@ -178,7 +178,7 @@ cargo run           # Run test container lifecycle
 python3 tests/adversarial/runner.py --all   # full suite (~1h), results in tests/adversarial/reports/
 ```
 
-Every `task_exec` attempt is persisted to the audit trail (`exec_logged` events, surfaced by `task_logs`).
+Every `task_exec` attempt is persisted to the audit trail (`exec_logged` events, surfaced by `task_logs`). Commands that exceed their `timeout` are terminated with a process-group SIGKILL (the command and everything it spawned); the result notes record the kill. Set `blockNpmScripts: true` on `task_create` to set `NPM_CONFIG_IGNORE_SCRIPTS=1` in the container so npm lifecycle scripts (pre/postinstall) cannot run.
 
 ---
 
@@ -393,7 +393,7 @@ Create a task called "test" with taskId "test-1", then list all tasks.
 
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
-| `task_create` | Create sandboxed task + Docker container | `taskId`, `name`, `image?`, `owner?` |
+| `task_create` | Create sandboxed task + Docker container | `taskId`, `name`, `image?`, `owner?`, `network?`, `blockNpmScripts?` |
 | `task_exec` | Run command inside sandbox | `taskId`, `command` (string[]), `timeout?` |
 | `task_upload` | Write file into container (restricted paths) | `taskId`, `path`, `content` (max 10MB) |
 | `task_download` | Read file from container (restricted paths) | `taskId`, `path` |
