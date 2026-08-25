@@ -1,4 +1,5 @@
 use agentic_armor::config::Config;
+use agentic_armor::docker::{exec_kill_command, exec_wrap_command};
 use agentic_armor::mcp::server::{
     arg_opt_str, arg_str, arg_str_array, arg_u64, base64_encode, default_task_mounts,
     is_valid_network_mode, npm_scripts_blocked_env, upload_chunk_commands, validate_path,
@@ -529,6 +530,59 @@ fn arg_str_array_names_the_offending_index() {
 
 #[test]
 fn npm_scripts_blocked_env_maps_flag() {
-    assert_eq!(npm_scripts_blocked_env(true), Some(vec!["NPM_CONFIG_IGNORE_SCRIPTS=1".to_string()]));
+    assert_eq!(
+        npm_scripts_blocked_env(true),
+        Some(vec!["NPM_CONFIG_IGNORE_SCRIPTS=1".to_string()])
+    );
     assert_eq!(npm_scripts_blocked_env(false), None);
+}
+
+// ---------------------------------------------------------------------------
+// Exec timeout kill plumbing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn exec_wrap_command_records_pgid_runs_payload_and_self_cleans() {
+    let pid_file = "/tmp/armor-exec-deadbeef.pid";
+    let payload = vec!["sleep".to_string(), "60".to_string()];
+    let wrapped = exec_wrap_command(pid_file, &payload);
+    assert_eq!(wrapped[0], "sh");
+    assert_eq!(wrapped[1], "-c");
+    let script = &wrapped[2];
+    assert!(
+        script.starts_with(&format!("echo $$ > {pid_file};")),
+        "script must record the wrapper pid (== pgid) first: {script}"
+    );
+    assert!(
+        script.contains("\"$@\" <&0 >&1 2>&2"),
+        "payload must run with inherited stdio: {script}"
+    );
+    assert!(
+        script.contains("; s=$?; rm -f ") && script.ends_with("; exit $s"),
+        "script must rm the pidfile and propagate the payload exit status: {script}"
+    );
+    assert_eq!(
+        &wrapped[4..],
+        &payload[..],
+        "payload preserved verbatim after $0 marker"
+    );
+}
+
+#[test]
+fn exec_kill_command_kills_process_group_and_cleans_up() {
+    let pid_file = "/tmp/armor-exec-cafe.pid";
+    let kill = exec_kill_command(pid_file);
+    assert_eq!(kill[0], "sh");
+    assert_eq!(kill[1], "-c");
+    assert!(
+        kill[2].starts_with("kill -9 -$(cat "),
+        "must SIGKILL the recorded process GROUP (negative pid): {}",
+        kill[2]
+    );
+    assert!(kill[2].contains(pid_file));
+    assert!(
+        kill[2].contains("rm -f"),
+        "must remove the pidfile after killing: {}",
+        kill[2]
+    );
 }

@@ -186,6 +186,37 @@ impl BollardRuntime {
     }
 }
 
+/// Wraps an exec command so the wrapper pid (== process-group id) is recorded to
+/// `pid_file`. The payload runs as a child of the wrapper in the same process group:
+/// on success the pidfile is removed and the exit status propagated; on timeout a
+/// group kill (`kill -9 -PID`) terminates the wrapper, the payload, and any
+/// subprocesses the payload spawned.
+pub fn exec_wrap_command(pid_file: &str, command: &[String]) -> Vec<String> {
+    let mut wrapped = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        format!(
+            "echo $$ > {f}; \"$@\" <&0 >&1 2>&2; s=$?; rm -f {f}; exit $s",
+            f = pid_file
+        ),
+        "armor".to_string(),
+    ];
+    wrapped.extend(command.iter().cloned());
+    wrapped
+}
+
+/// Kills the process recorded in `pid_file` (SIGKILL) and removes the file.
+pub fn exec_kill_command(pid_file: &str) -> Vec<String> {
+    vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        format!(
+            "kill -9 -$(cat {}) 2>/dev/null; rm -f {}",
+            pid_file, pid_file
+        ),
+    ]
+}
+
 #[async_trait]
 impl ContainerRuntime for BollardRuntime {
     fn runtime_name(&self) -> &str {
@@ -260,8 +291,12 @@ impl ContainerRuntime for BollardRuntime {
     async fn exec_in_container(&self, id: &str, request: &ExecRequest) -> ArmorResult<ExecResult> {
         let start = Instant::now();
 
+        let exec_nonce = uuid::Uuid::new_v4().simple().to_string();
+        let pid_file = format!("/tmp/armor-exec-{}.pid", exec_nonce);
+        let wrapped = exec_wrap_command(&pid_file, &request.command);
+
         let exec_config = CreateExecOptions {
-            cmd: Some(request.command.clone()),
+            cmd: Some(wrapped),
             user: request.user.clone(),
             working_dir: request.working_dir.clone(),
             env: None,
@@ -299,8 +334,17 @@ impl ContainerRuntime for BollardRuntime {
                         }
                     } => {}
                     _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {
-                        warn!("Exec timed out after {}ms", timeout_ms);
-                        exec_notes.push(format!("[agentic-armor] exec timed out after {}ms — the process may still be running inside the container", timeout_ms));
+                        warn!("Exec timed out after {}ms — killing pid from {}", timeout_ms, pid_file);
+                        let kill_cmd = exec_kill_command(&pid_file);
+                        if let Ok(kill_exec) = self.docker.create_exec(id, CreateExecOptions {
+                            cmd: Some(kill_cmd),
+                            attach_stdout: Some(false),
+                            attach_stderr: Some(false),
+                            ..Default::default()
+                        }).await {
+                            let _ = self.docker.start_exec(&kill_exec.id, None).await;
+                        }
+                        exec_notes.push(format!("[agentic-armor] exec timed out after {}ms — the process was killed (SIGKILL) inside the container", timeout_ms));
                     }
                 }
             }
