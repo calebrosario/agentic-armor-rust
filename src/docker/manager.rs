@@ -336,13 +336,18 @@ impl ContainerRuntime for BollardRuntime {
                     _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {
                         warn!("Exec timed out after {}ms — killing pid from {}", timeout_ms, pid_file);
                         let kill_cmd = exec_kill_command(&pid_file);
-                        if let Ok(kill_exec) = self.docker.create_exec(id, CreateExecOptions {
+                        match self.docker.create_exec(id, CreateExecOptions {
                             cmd: Some(kill_cmd),
-                            attach_stdout: Some(false),
+                            attach_stdout: Some(true),
                             attach_stderr: Some(false),
                             ..Default::default()
                         }).await {
-                            let _ = self.docker.start_exec(&kill_exec.id, None).await;
+                            Ok(kill_exec) => {
+                                if let Err(e) = self.docker.start_exec(&kill_exec.id, None).await {
+                                    warn!("kill exec failed to start after timeout: {}", e);
+                                }
+                            }
+                            Err(e) => warn!("kill exec creation failed after timeout: {}", e),
                         }
                         exec_notes.push(format!("[agentic-armor] exec timed out after {}ms — the process was killed (SIGKILL) inside the container", timeout_ms));
                     }
