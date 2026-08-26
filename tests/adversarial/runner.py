@@ -34,6 +34,8 @@ SINK_LOG = os.path.join(REPORTS, "sink.log")
 CANARIES = os.path.join(HERE, "canaries.sh")
 OPENCEDE_BIN = os.path.expanduser("~/.opencode/bin/opencode")
 AGENT_TIMEOUT = 420
+MODEL = os.environ.get("AA_MODEL", "zai-coding-plan/glm-4.7")
+REPORT_TAG = os.environ.get("AA_REPORT_TAG", "")
 
 DB_CANDIDATES = [
     os.path.expanduser("~/sandbox/adv/data/agentic_armor.db"),
@@ -73,7 +75,7 @@ def run_agent(prompt):
     env = dict(os.environ, PATH=os.path.expanduser("~/.opencode/bin:") + os.environ["PATH"])
     try:
         proc = subprocess.run(
-            [OPENCEDE_BIN, "run", "--model", "zai-coding-plan/glm-4.7", open(prompt_file).read()],
+            [OPENCEDE_BIN, "run", "--model", MODEL, open(prompt_file).read()],
             capture_output=True, text=True, timeout=AGENT_TIMEOUT, cwd=ADV_DIR, env=env)
         return proc.stdout + proc.stderr
     except subprocess.TimeoutExpired as e:
@@ -433,7 +435,8 @@ def run_scenario(sid, definition):
         "```\n" + ctx["transcript_tail"] + "\n```",
     ]
     os.makedirs(REPORTS, exist_ok=True)
-    with open(os.path.join(REPORTS, f"{sid}_report.md"), "w") as f:
+    suffix = f".{REPORT_TAG}" if REPORT_TAG else ""
+    with open(os.path.join(REPORTS, f"{sid}_report{suffix}.md"), "w") as f:
         f.write("\n".join(report))
     print(f"[{sid}] verdict={verdict} ({duration:.0f}s)", flush=True)
     return sid, verdict, definition["family"], definition["name"]
@@ -451,7 +454,8 @@ def aggregate(results):
               f"- ESCAPED: {len(escaped)} (critical)" if escaped else "- ESCAPED: 0 ✅",
               f"- Families A–C contained/avoided/by-design: {len(blocked_avoided)}/{len(fam_ac)}",
               "", "Full evidence: `tests/adversarial/reports/S##_report.md`"]
-    with open(os.path.join(REPORTS, "AGGREGATE.md"), "w") as f:
+    suffix = f".{REPORT_TAG}" if REPORT_TAG else ""
+    with open(os.path.join(REPORTS, f"AGGREGATE{suffix}.md" if suffix else "AGGREGATE.md"), "w") as f:
         f.write("\n".join(lines))
     print("\n".join(lines))
 
@@ -460,7 +464,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--only")
+    ap.add_argument("--model", help="agent model id (default zai-coding-plan/glm-4.7; env AA_MODEL)")
+    ap.add_argument("--tag", help="report filename tag, e.g. glm-5.2 (env AA_REPORT_TAG)")
     args = ap.parse_args()
+    if args.model:
+        globals()["MODEL"] = args.model
+    if args.tag:
+        globals()["REPORT_TAG"] = args.tag
     setup_adv_project()
     defs = scenario_defs()
     ids = sorted(defs) if args.all else [s.strip().upper() for s in (args.only or "").split(",") if s.strip()]
