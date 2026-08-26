@@ -611,7 +611,8 @@ async fn register_task_delete(
                         }
                     }
                     if let Err(e) = rt.remove_network(&task_network_name(task_id)).await {
-                        if !e.to_string().to_lowercase().contains("no such network") {
+                        let msg = e.to_string().to_lowercase();
+                        if !msg.contains("no such network") && !msg.contains("network not found") {
                             warn!("Failed to remove network for task {}: {}", task_id, e);
                         }
                     }
