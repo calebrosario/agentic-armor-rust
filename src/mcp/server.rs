@@ -168,7 +168,7 @@ async fn register_task_create(
                         cap_drop: Some(vec!["ALL".into()]),
                         user: Some("opencode".into()),
                         env: npm_scripts_blocked_env(block_npm_scripts),
-                        mounts: Some(default_task_mounts()),
+                        mounts: Some(default_task_mounts_for(rt.runtime_name())),
                         ..Default::default()
                     };
 
@@ -719,27 +719,43 @@ pub fn task_tmpfs_options(size_mb: usize) -> String {
 }
 
 pub fn default_task_mounts() -> Vec<Mount> {
+    default_task_mounts_for("docker")
+}
+
+/// Docker accepts tmpfs ownership options (uid=/gid=); podman 4.x rejects them
+/// ("unknown mount option \"uid=1001\"") across rootless, rootful, crun and runc.
+/// The portable podman equivalent is a sticky world-writable tmpfs (mode=1777,
+/// the /tmp pattern): the sandbox uid creates and owns its files, and the sticky
+/// bit blocks cross-owner deletion within the single-uid container.
+pub fn default_task_mounts_for(runtime: &str) -> Vec<Mount> {
+    let opts_for = |size: &str| {
+        if runtime == "podman" {
+            format!("size={size},mode=1777")
+        } else {
+            format!("size={size},uid=1001,gid=1001,mode=0775")
+        }
+    };
     vec![
         Mount {
-            source: "".into(),
             target: "/tmp".into(),
+            source: String::new(),
             mount_type: "tmpfs".into(),
             read_only: None,
-            tmpfs_options: Some(task_tmpfs_options(64)),
+            tmpfs_options: Some(opts_for("64m")),
         },
         Mount {
-            source: "".into(),
             target: "/home/opencode".into(),
+            source: String::new(),
             mount_type: "tmpfs".into(),
             read_only: None,
-            tmpfs_options: Some(task_tmpfs_options(64)),
+            tmpfs_options: Some(opts_for("64m")),
         },
         Mount {
-            source: "".into(),
             target: "/workspace".into(),
+            source: String::new(),
             mount_type: "tmpfs".into(),
             read_only: None,
-            tmpfs_options: Some(task_tmpfs_options(256)),
+            tmpfs_options: Some(opts_for("256m")),
         },
     ]
 }

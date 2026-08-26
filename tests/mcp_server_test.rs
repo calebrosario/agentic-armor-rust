@@ -2,7 +2,8 @@ use agentic_armor::config::Config;
 use agentic_armor::docker::{exec_kill_command, exec_wrap_command};
 use agentic_armor::mcp::server::{
     arg_opt_str, arg_str, arg_str_array, arg_u64, base64_encode, default_task_mounts,
-    is_valid_network_mode, npm_scripts_blocked_env, upload_chunk_commands, validate_path,
+    default_task_mounts_for, is_valid_network_mode, npm_scripts_blocked_env, upload_chunk_commands,
+    validate_path,
 };
 
 fn mounts_by_target(target: &str) -> agentic_armor::Mount {
@@ -32,6 +33,28 @@ fn tmpfs_mounts_are_writable_by_sandbox_user() {
             opts.contains("uid=1001") && opts.contains("gid=1001") && opts.contains("mode=0775"),
             "{} must be owned by sandbox user 1001, got: {}",
             target,
+            opts
+        );
+    }
+}
+
+#[test]
+fn podman_tmpfs_mounts_use_sticky_mode_instead_of_uid_options() {
+    for target in ["/tmp", "/home/opencode", "/workspace"] {
+        let m = default_task_mounts_for("podman")
+            .into_iter()
+            .find(|m| m.target == target)
+            .unwrap_or_else(|| panic!("no mount for {}", target));
+        let opts = m.tmpfs_options.expect("tmpfs options required");
+        assert!(
+            opts.contains("mode=1777"),
+            "{} must be sticky world-writable on podman, got: {}",
+            target,
+            opts
+        );
+        assert!(
+            !opts.contains("uid=") && !opts.contains("gid="),
+            "podman rejects uid=/gid= tmpfs options, got: {}",
             opts
         );
     }
