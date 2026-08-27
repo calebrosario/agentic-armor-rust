@@ -1,6 +1,9 @@
 use agentic_armor::config::Config;
+use agentic_armor::docker::{exec_kill_command, exec_wrap_command};
 use agentic_armor::mcp::server::{
-    base64_encode, default_task_mounts, is_valid_network_mode, upload_chunk_commands, validate_path,
+    arg_opt_str, arg_str, arg_str_array, arg_u64, base64_encode, default_task_mounts,
+    default_task_mounts_for, is_valid_network_mode, npm_scripts_blocked_env, upload_chunk_commands,
+    validate_path,
 };
 
 fn mounts_by_target(target: &str) -> agentic_armor::Mount {
@@ -30,6 +33,28 @@ fn tmpfs_mounts_are_writable_by_sandbox_user() {
             opts.contains("uid=1001") && opts.contains("gid=1001") && opts.contains("mode=0775"),
             "{} must be owned by sandbox user 1001, got: {}",
             target,
+            opts
+        );
+    }
+}
+
+#[test]
+fn podman_tmpfs_mounts_use_sticky_mode_instead_of_uid_options() {
+    for target in ["/tmp", "/home/opencode", "/workspace"] {
+        let m = default_task_mounts_for("podman")
+            .into_iter()
+            .find(|m| m.target == target)
+            .unwrap_or_else(|| panic!("no mount for {}", target));
+        let opts = m.tmpfs_options.expect("tmpfs options required");
+        assert!(
+            opts.contains("mode=1777"),
+            "{} must be sticky world-writable on podman, got: {}",
+            target,
+            opts
+        );
+        assert!(
+            !opts.contains("uid=") && !opts.contains("gid="),
+            "podman rejects uid=/gid= tmpfs options, got: {}",
             opts
         );
     }
@@ -455,5 +480,132 @@ fn render_exec_stderr_joins_parts_in_order() {
         render_exec_stderr("", &["note".into()], "  — hint  "),
         "note\n— hint",
         "fork hint trimmed, leading stderr gap skipped"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JSON argument validation (type-confusion hardening)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn arg_str_requires_string_and_reports_actual_type() {
+    let args = serde_json::json!({ "taskId": 123, "owner": "agent-1" });
+    let err = arg_str(&args, "taskId").unwrap_err();
+    assert!(
+        err.contains("'taskId' must be a string, got number"),
+        "got: {err}"
+    );
+    assert_eq!(arg_str(&args, "owner").unwrap(), "agent-1");
+    let missing = arg_str(&args, "nope").unwrap_err();
+    assert!(
+        missing.contains("missing required argument: nope"),
+        "got: {missing}"
+    );
+}
+
+#[test]
+fn arg_opt_str_accepts_absent_but_rejects_wrong_type() {
+    let args = serde_json::json!({ "image": false });
+    assert!(arg_opt_str(&args, "absent").unwrap().is_none());
+    let err = arg_opt_str(&args, "image").unwrap_err();
+    assert!(
+        err.contains("'image' must be a string, got boolean"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn arg_u64_rejects_negative_float_and_string_but_accepts_u64() {
+    let args = serde_json::json!({ "a": -1, "b": 1.5, "c": "3000", "d": 3000 });
+    assert!(arg_u64(&args, "a")
+        .unwrap_err()
+        .contains("must be a non-negative integer"));
+    assert!(arg_u64(&args, "b")
+        .unwrap_err()
+        .contains("must be a non-negative integer"));
+    assert!(arg_u64(&args, "c")
+        .unwrap_err()
+        .contains("must be a non-negative integer"));
+    assert!(arg_u64(&args, "absent").unwrap().is_none());
+    assert_eq!(arg_u64(&args, "d").unwrap(), Some(3000));
+}
+
+#[test]
+fn arg_str_array_names_the_offending_index() {
+    let args = serde_json::json!({ "command": ["ls", "-la", 42] });
+    let err = arg_str_array(&args, "command").unwrap_err();
+    assert!(
+        err.contains("'command'[2] must be a string, got number"),
+        "got: {err}"
+    );
+    assert_eq!(
+        arg_str_array(&serde_json::json!({ "command": ["echo", "hi"] }), "command").unwrap(),
+        vec!["echo".to_string(), "hi".to_string()]
+    );
+    assert!(arg_str_array(&serde_json::json!({}), "command")
+        .unwrap_err()
+        .contains("missing required argument"));
+}
+
+// ---------------------------------------------------------------------------
+// blockNpmScripts env mapping
+// ---------------------------------------------------------------------------
+
+#[test]
+fn npm_scripts_blocked_env_maps_flag() {
+    assert_eq!(
+        npm_scripts_blocked_env(true),
+        Some(vec!["NPM_CONFIG_IGNORE_SCRIPTS=1".to_string()])
+    );
+    assert_eq!(npm_scripts_blocked_env(false), None);
+}
+
+// ---------------------------------------------------------------------------
+// Exec timeout kill plumbing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn exec_wrap_command_records_pgid_runs_payload_and_self_cleans() {
+    let pid_file = "/tmp/armor-exec-deadbeef.pid";
+    let payload = vec!["sleep".to_string(), "60".to_string()];
+    let wrapped = exec_wrap_command(pid_file, &payload);
+    assert_eq!(wrapped[0], "sh");
+    assert_eq!(wrapped[1], "-c");
+    let script = &wrapped[2];
+    assert!(
+        script.starts_with(&format!("echo $$ > {pid_file};")),
+        "script must record the wrapper pid (== pgid) first: {script}"
+    );
+    assert!(
+        script.contains("\"$@\" <&0 >&1 2>&2"),
+        "payload must run with inherited stdio: {script}"
+    );
+    assert!(
+        script.contains("; s=$?; rm -f ") && script.ends_with("; exit $s"),
+        "script must rm the pidfile and propagate the payload exit status: {script}"
+    );
+    assert_eq!(
+        &wrapped[4..],
+        &payload[..],
+        "payload preserved verbatim after $0 marker"
+    );
+}
+
+#[test]
+fn exec_kill_command_kills_process_group_and_cleans_up() {
+    let pid_file = "/tmp/armor-exec-cafe.pid";
+    let kill = exec_kill_command(pid_file);
+    assert_eq!(kill[0], "sh");
+    assert_eq!(kill[1], "-c");
+    assert!(
+        kill[2].starts_with("kill -9 -$(cat "),
+        "must SIGKILL the recorded process GROUP (negative pid): {}",
+        kill[2]
+    );
+    assert!(kill[2].contains(pid_file));
+    assert!(
+        kill[2].contains("rm -f"),
+        "must remove the pidfile after killing: {}",
+        kill[2]
     );
 }
