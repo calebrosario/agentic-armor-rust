@@ -44,6 +44,10 @@ DB_CANDIDATES = [
 
 TOOLCALL_RE = re.compile(r"agentic-armor_(task_\w+)")
 CLEANUP_LOG = []
+
+
+class HarnessAbort(Exception):
+    """Instrumentation is untrustworthy; stop grading and preserve evidence."""
 MARKERS = {}
 
 
@@ -128,8 +132,8 @@ def canary_state():
     r = sh(f"bash {CANARIES} hashes")
     state = r.stdout.strip()
     if not re.findall(r"[0-9a-f]{64}", state):
-        print(f"HARNESS-ERROR: canary hashes unreadable (rc={r.returncode}): {state[:120]!r}", flush=True)
-        sys.exit(2)
+        raise HarnessAbort(
+            f"canary hashes unreadable (rc={r.returncode}): {state[:120]!r}")
     return state
 
 
@@ -167,7 +171,7 @@ def db_rowid_watermarks():
                 marks[path] = conn.execute("SELECT COALESCE(MAX(rowid),0) FROM task_events").fetchone()[0]
                 conn.close()
             except sqlite3.Error as e:
-                raise RuntimeError(f"cannot read task_events watermark for {path}: {e}") from e
+                raise HarnessAbort(f"cannot read task_events watermark for {path}: {e}") from e
     return marks
 
 
@@ -209,12 +213,14 @@ def cleanup_tasks(db_path):
     """Best-effort: delete every task the agent created, via the shared DB's cwd."""
     cwd = os.path.dirname(os.path.dirname(db_path)) if db_path else None
     if not cwd or not os.path.isdir(cwd):
+        CLEANUP_LOG.append("skipped: no agent db found — stale armor-* containers NOT removed by rpc path")
         return
     ids = set()
     for ev in db_events(db_path):
         if isinstance(ev.get("task_id"), str):
             ids.add(ev["task_id"])
     if not ids:
+        CLEANUP_LOG.append(f"skipped: no task ids in {db_path} — stale armor-* containers NOT removed by rpc path")
         return
     script = (
         "import subprocess,json,sys,time,select\n"
@@ -246,9 +252,12 @@ def cleanup_tasks(db_path):
             CLEANUP_LOG.append(f"cleanup rpc rc={r.returncode}: {(r.stdout + r.stderr)[:200]}")
     except Exception as e:
         CLEANUP_LOG.append(f"cleanup rpc error: {e}")
-    rm = sh("sudo docker ps -aq --filter 'name=armor-' | xargs -r sudo docker rm -f", timeout=120)
-    if rm.returncode != 0:
-        CLEANUP_LOG.append(f"docker rm rc={rm.returncode}: {(rm.stdout + rm.stderr)[:200]}")
+    try:
+        rm = sh("sudo docker ps -aq --filter 'name=armor-' | xargs -r sudo docker rm -f", timeout=120)
+        if rm.returncode != 0:
+            CLEANUP_LOG.append(f"docker rm rc={rm.returncode}: {(rm.stdout + rm.stderr)[:200]}")
+    except subprocess.TimeoutExpired:
+        CLEANUP_LOG.append("docker rm timed out after 120s — daemon wedged?")
 
 
 # ---------------------------------------------------------------- scenarios
@@ -569,8 +578,25 @@ def main():
     setup_adv_project()
     defs = scenario_defs()
     ids = sorted(defs) if args.all else [s.strip().upper() for s in (args.only or "").split(",") if s.strip()]
-    results = [run_scenario(sid, defs[sid]) for sid in ids]
+    unknown = [i for i in ids if i not in defs]
+    if unknown:
+        ap.print_usage()
+        print(f"unknown scenario id(s): {', '.join(unknown)} — available: {', '.join(sorted(defs))}")
+        sys.exit(2)
+    results = []
+    abort_reason = None
+    for sid in ids:
+        try:
+            results.append(run_scenario(sid, defs[sid]))
+        except (HarnessAbort, subprocess.TimeoutExpired, RuntimeError) as e:
+            abort_reason = f"{sid}: {e}"
+            print(f"HARNESS-ABORT at {abort_reason}", flush=True)
+            break
     aggregate(results)
+    if abort_reason:
+        print(f"SUITE ABORTED — {abort_reason}. Completed {len(results)}/{len(ids)} scenarios; "
+              "aggregate above reflects completed runs only.", flush=True)
+        sys.exit(2)
     fam_d = [r for r in results if r[2] == "D"]
     if fam_d:
         non_verdicts = [r for r in fam_d if r[1] in ("UNCLEAR", "NO-ENGAGEMENT")]
