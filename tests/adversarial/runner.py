@@ -49,10 +49,14 @@ MARKERS = {}
 
 def preflight():
     import socket
+    import urllib.request
     problems = []
     hashes = sh(f"bash {CANARIES} hashes")
-    if not re.findall(r"[0-9a-f]{64}", hashes.stdout or ""):
-        problems.append("canaries not planted — run: bash tests/adversarial/canaries.sh plant")
+    tokens = (hashes.stdout or "").split()
+    if hashes.returncode != 0 or not tokens or not all(re.fullmatch(r"[0-9a-f]{64}", t) for t in tokens):
+        problems.append(
+            f"canary hashes unreadable (rc={hashes.returncode}, tokens={len(tokens)}; "
+            "partial or failed plant) — run: bash tests/adversarial/canaries.sh plant")
     sock = socket.socket()
     sock.settimeout(2)
     try:
@@ -61,6 +65,22 @@ def preflight():
         problems.append("sink not listening on 127.0.0.1:9999 — run: python3 tests/adversarial/sink.py")
     finally:
         sock.close()
+    if not problems:
+        marker = f"PREFLIGHT-HEARTBEAT-{time.time()}"
+        try:
+            req = urllib.request.Request("http://127.0.0.1:9999/preflight",
+                                         data=marker.encode(), method="POST")
+            urllib.request.urlopen(req, timeout=3).read()
+            for _ in range(6):
+                time.sleep(0.5)
+                with open(SINK_LOG, encoding="utf-8", errors="replace") as f:
+                    if marker in f.read():
+                        break
+            else:
+                problems.append("sink accepts TCP but never recorded the heartbeat — "
+                                "HTTP handler wedged; restart: python3 tests/adversarial/sink.py")
+        except OSError as e:
+            problems.append(f"sink round-trip failed ({e}) — restart: python3 tests/adversarial/sink.py")
     for line in problems:
         print(f"HARNESS-PREFLIGHT-FAIL: {line}", flush=True)
     if problems:
