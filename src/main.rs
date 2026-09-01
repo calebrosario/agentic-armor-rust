@@ -33,12 +33,22 @@ async fn main() -> Result<(), ArmorError> {
         return Err(e);
     }
 
-    let _ = std::fs::create_dir_all("./data");
+    if let Err(e) = std::fs::create_dir_all("./data") {
+        tracing::warn!("Could not create ./data directory: {}", e);
+    }
 
-    let db_options =
-        sqlx::sqlite::SqliteConnectOptions::from_str("sqlite://./data/agentic_armor.db?mode=rwc")
-            .map_err(|e| ArmorError::Database(e.to_string()))?
-            .busy_timeout(std::time::Duration::from_millis(5000));
+    if !config.database_url.starts_with("sqlite:") {
+        return Err(ArmorError::Database(format!(
+            "DATABASE_URL must be a sqlite: URL, got {:?}",
+            config.database_url
+        )));
+    }
+    let db_options = sqlx::sqlite::SqliteConnectOptions::from_str(&config.database_url)
+        .map_err(|e| ArmorError::Database(e.to_string()))?
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_millis(5000));
     let pool = sqlx::SqlitePool::connect_with(db_options)
         .await
         .map_err(|e| ArmorError::Database(e.to_string()))?;
