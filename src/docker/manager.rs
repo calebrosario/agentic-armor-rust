@@ -523,7 +523,11 @@ impl BollardRuntime {
             Some(mode) => {
                 let valid = mode.len() <= 64
                     && mode.chars().all(|c| {
-                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' || c == '.'
+                        c.is_ascii_lowercase()
+                            || c.is_ascii_digit()
+                            || c == '-'
+                            || c == '_'
+                            || c == '.'
                     });
                 if !valid {
                     return Err(ArmorError::InvalidUsernsMode(mode.to_string()));

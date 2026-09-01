@@ -32,7 +32,9 @@ fn test_forbidden_mount_patterns() {
         "/run/podman",
     ] {
         assert!(
-            config.forbidden_mount_patterns.contains(&pattern.to_string()),
+            config
+                .forbidden_mount_patterns
+                .contains(&pattern.to_string()),
             "missing forbidden mount pattern: {}",
             pattern
         );

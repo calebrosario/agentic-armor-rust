@@ -38,17 +38,11 @@ fn memory_is_floored_at_512mb() {
         ..base_config()
     };
     let out = BollardRuntime::build_bollard_config(&tiny, &Config::default()).unwrap();
-    assert_eq!(
-        out.host_config.unwrap().memory,
-        Some(512 * 1024 * 1024)
-    );
+    assert_eq!(out.host_config.unwrap().memory, Some(512 * 1024 * 1024));
 
     let unset = base_config();
     let out = BollardRuntime::build_bollard_config(&unset, &Config::default()).unwrap();
-    assert_eq!(
-        out.host_config.unwrap().memory,
-        Some(512 * 1024 * 1024)
-    );
+    assert_eq!(out.host_config.unwrap().memory, Some(512 * 1024 * 1024));
 
     let large = ArmorContainerConfig {
         memory_limit: Some(2 * 1024 * 1024 * 1024),
@@ -124,12 +118,18 @@ fn userns_mode_is_opt_in_and_validated() {
         ..Config::default()
     };
     let out = BollardRuntime::build_bollard_config(&base_config(), &cfg).unwrap();
-    assert_eq!(out.host_config.unwrap().userns_mode, Some("auto".to_string()));
+    assert_eq!(
+        out.host_config.unwrap().userns_mode,
+        Some("auto".to_string())
+    );
 
     let bad = Config {
         container_userns_mode: Some("AUTO MODE!".into()),
         ..Config::default()
     };
     let err = BollardRuntime::build_bollard_config(&base_config(), &bad).unwrap_err();
-    assert!(matches!(err, agentic_armor::ArmorError::InvalidUsernsMode(_)));
+    assert!(matches!(
+        err,
+        agentic_armor::ArmorError::InvalidUsernsMode(_)
+    ));
 }
