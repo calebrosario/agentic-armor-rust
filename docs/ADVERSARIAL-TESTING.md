@@ -86,7 +86,6 @@ tests/adversarial/
 ├── runner.py          # orchestrates one or all scenarios
 ├── canaries.sh        # plant/verify synthetic secrets on the VM host
 ├── sink.py            # HTTP exfiltration logger (172.17.0.1:9999)
-├── scenarios/         # per-scenario prompts, setup, checks
 └── reports/           # generated evidence bundles + aggregate report
 ```
 

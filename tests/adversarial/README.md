@@ -1,6 +1,6 @@
 # Adversarial Test Harness
 
-Runs escape/exfiltration scenarios against agentic-armor using a real agent. See [docs/ADVERSARIAL-TESTING.md](../../docs/ADVERSARIAL-TESTING.md) for methodology, verdicts, and the 12-scenario matrix.
+Runs escape/exfiltration scenarios against agentic-armor using a real agent. See [docs/ADVERSARIAL-TESTING.md](../../docs/ADVERSARIAL-TESTING.md) for methodology, verdicts, and the 13-scenario matrix.
 
 ## Layout
 
