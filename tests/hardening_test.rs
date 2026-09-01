@@ -113,3 +113,23 @@ fn network_none_is_the_default_network_mode() {
     let out = BollardRuntime::build_bollard_config(&cfg, &Config::default()).unwrap();
     assert_eq!(out.host_config.unwrap().network_mode, Some("none".into()));
 }
+
+#[test]
+fn userns_mode_is_opt_in_and_validated() {
+    let out = BollardRuntime::build_bollard_config(&base_config(), &Config::default()).unwrap();
+    assert_eq!(out.host_config.unwrap().userns_mode, None);
+
+    let cfg = Config {
+        container_userns_mode: Some("auto".into()),
+        ..Config::default()
+    };
+    let out = BollardRuntime::build_bollard_config(&base_config(), &cfg).unwrap();
+    assert_eq!(out.host_config.unwrap().userns_mode, Some("auto".to_string()));
+
+    let bad = Config {
+        container_userns_mode: Some("AUTO MODE!".into()),
+        ..Config::default()
+    };
+    let err = BollardRuntime::build_bollard_config(&base_config(), &bad).unwrap_err();
+    assert!(matches!(err, agentic_armor::ArmorError::InvalidUsernsMode(_)));
+}

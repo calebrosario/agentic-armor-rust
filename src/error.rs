@@ -32,6 +32,9 @@ pub enum ArmorError {
     #[error("Invalid mount config: {0}")]
     InvalidMountConfig(String),
 
+    #[error("Invalid user namespace mode: {0} — expected a lowercase runtime mode such as 'auto' (Podman) or a daemon remap name (Docker userns-remap)")]
+    InvalidUsernsMode(String),
+
     #[error("Container creation failed: {0}")]
     ContainerCreateFailed(String),
 
@@ -53,6 +56,7 @@ impl ArmorError {
             ArmorError::HostNetworkDenied => "HOST_NETWORK_DENIED",
             ArmorError::InvalidNetworkMode(_) => "INVALID_NETWORK_MODE",
             ArmorError::InvalidMountConfig(_) => "INVALID_MOUNT_CONFIG",
+            ArmorError::InvalidUsernsMode(_) => "INVALID_USERNS_MODE",
             ArmorError::ContainerCreateFailed(_) => "CONTAINER_CREATE_FAILED",
             ArmorError::DockerConnectionFailed(_) => "DOCKER_CONNECTION_FAILED",
             ArmorError::Database(_) => "DATABASE_ERROR",

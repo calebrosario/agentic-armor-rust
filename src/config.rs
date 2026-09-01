@@ -28,6 +28,7 @@ pub struct Config {
     pub allow_host_network: bool,
     pub container_runtime: RuntimeChoice,
     pub podman_socket: Option<String>,
+    pub container_userns_mode: Option<String>,
     pub allowed_images: Vec<String>,
     pub allowed_path_prefixes: Vec<String>,
     pub forbidden_mount_patterns: Vec<String>,
@@ -56,6 +57,10 @@ impl Default for Config {
                 &env::var("CONTAINER_RUNTIME").unwrap_or_default(),
             ),
             podman_socket: env::var("PODMAN_SOCKET").ok(),
+            container_userns_mode: env::var("CONTAINER_USERNS_MODE")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             allowed_images: vec![
                 "opencode-sandbox-base:latest".into(),
                 "opencode-sandbox-developer:latest".into(),

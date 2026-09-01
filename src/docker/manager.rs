@@ -525,6 +525,20 @@ impl BollardRuntime {
             .unwrap_or(runtime_config.container_pids_limit)
             .clamp(10, 1000);
 
+        let userns_mode = match runtime_config.container_userns_mode.as_deref() {
+            None | Some("") => None,
+            Some(mode) => {
+                let valid = mode.len() <= 64
+                    && mode.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' || c == '.'
+                    });
+                if !valid {
+                    return Err(ArmorError::InvalidUsernsMode(mode.to_string()));
+                }
+                Some(mode.to_string())
+            }
+        };
+
         let cap_drop = vec!["ALL".to_string()];
         let readonly_rootfs = true;
         let security_opt: Vec<String> = vec!["no-new-privileges".into()];
@@ -540,6 +554,7 @@ impl BollardRuntime {
             readonly_rootfs: Some(readonly_rootfs),
             auto_remove: config.auto_remove,
             security_opt: Some(security_opt),
+            userns_mode,
             ..Default::default()
         };
 
