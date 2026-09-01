@@ -178,7 +178,7 @@ cargo run           # Run test container lifecycle
 python3 tests/adversarial/runner.py --all   # full suite (~1h), results in tests/adversarial/reports/
 ```
 
-Every `task_exec` attempt is persisted to the audit trail (`exec_logged` events, surfaced by `task_logs`). Commands that exceed their `timeout` are terminated with a process-group SIGKILL (the command and everything it spawned); the result notes record the kill. Set `blockNpmScripts: true` on `task_create` to set `NPM_CONFIG_IGNORE_SCRIPTS=1` in the container so npm lifecycle scripts (pre/postinstall) cannot run.
+Every `task_exec` attempt is persisted to the audit trail (`exec_logged` events, surfaced by `task_logs`). Commands that exceed their `timeout` are terminated with a process-group SIGKILL covering the command and its process group (a payload that calls `setsid` can escape the group — kill verification makes that visible instead of assumed). The kill is verified by re-inspecting the exec: result notes and the `exec_logged` audit entry record `timedOut=true kill=verified|unverified`, and an undeliverable kill is reported as such rather than as success. Set `blockNpmScripts: true` on `task_create` to set `NPM_CONFIG_IGNORE_SCRIPTS=1` in the container so npm lifecycle scripts (pre/postinstall) cannot run.
 
 ---
 
