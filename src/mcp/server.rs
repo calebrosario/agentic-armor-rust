@@ -22,8 +22,8 @@ pub async fn start(
 
     register_task_create(&server, &config, &runtime, &registry, &lifecycle).await;
     register_task_exec(&server, &runtime, &lifecycle, &registry).await;
-    register_task_upload(&server, &runtime, &lifecycle, &config).await;
-    register_task_download(&server, &runtime, &lifecycle, &config).await;
+    register_task_upload(&server, &runtime, &lifecycle, &config, &registry).await;
+    register_task_download(&server, &runtime, &lifecycle, &config, &registry).await;
     register_task_list(&server, &registry).await;
     register_task_stop(&server, &runtime, &lifecycle, &registry).await;
     register_task_delete(&server, &runtime, &lifecycle, &registry).await;
@@ -332,10 +332,12 @@ async fn register_task_upload(
     runtime: &Arc<dyn ContainerRuntime>,
     lifecycle: &Arc<TaskLifecycle>,
     config: &Arc<Config>,
+    registry: &Arc<TaskRegistry>,
 ) {
     let rt = runtime.clone();
     let lc = lifecycle.clone();
     let cfg = config.clone();
+    let reg = registry.clone();
 
     server.register_tool(
         ToolBuilder::new("task_upload")
@@ -353,6 +355,7 @@ async fn register_task_upload(
                 let rt = rt.clone();
                 let lc = lc.clone();
                 let cfg = cfg.clone();
+                let reg = reg.clone();
                 async move {
                     let (task_id, path, content) = match (arg_str(&args, "taskId"), arg_str(&args, "path"), arg_str(&args, "content")) {
                         (Ok(a), Ok(b), Ok(c)) => (a, b, c),
@@ -388,12 +391,19 @@ async fn register_task_upload(
                             ..Default::default()
                         }).await {
                             Ok(r) => r,
-                            Err(e) => return Ok(CallToolResult::error(format!("Upload failed: {}", e))),
+                            Err(e) => {
+                                audit_event(&reg, task_id, "upload_failed", &format!("upload {} exec error: {}", path, e)).await;
+                                return Ok(CallToolResult::error(format!("Upload failed: {}", e)));
+                            }
                         };
                         if result.exit_code != 0 {
-                            return Ok(CallToolResult::error(result.stderr));
+                            let rendered = render_exec_stderr(&result.stderr, &result.notes, "");
+                            audit_event(&reg, task_id, "upload_failed", &format!("upload {} failed (exit={}): {}", path, result.exit_code, rendered)).await;
+                            return Ok(CallToolResult::error(format!("Upload failed: {}", rendered)));
                         }
                     }
+
+                    audit_event(&reg, task_id, "file_uploaded", &format!("upload {} bytes -> {}", content.len(), path)).await;
 
                     Ok(CallToolResult::text(json!({
                         "success": true,
@@ -410,10 +420,12 @@ async fn register_task_download(
     runtime: &Arc<dyn ContainerRuntime>,
     lifecycle: &Arc<TaskLifecycle>,
     config: &Arc<Config>,
+    registry: &Arc<TaskRegistry>,
 ) {
     let rt = runtime.clone();
     let lc = lifecycle.clone();
     let cfg = config.clone();
+    let reg = registry.clone();
 
     server.register_tool(
         ToolBuilder::new("task_download")
@@ -430,6 +442,7 @@ async fn register_task_download(
                 let rt = rt.clone();
                 let lc = lc.clone();
                 let cfg = cfg.clone();
+                let reg = reg.clone();
                 async move {
                     let (task_id, path) = match (arg_str(&args, "taskId"), arg_str(&args, "path")) {
                         (Ok(a), Ok(b)) => (a, b),
@@ -460,15 +473,22 @@ async fn register_task_download(
                         ..Default::default()
                     }).await {
                         Ok(r) => r,
-                        Err(e) => return Ok(CallToolResult::error(format!("Download failed: {}", e))),
+                        Err(e) => {
+                            audit_event(&reg, task_id, "download_failed", &format!("download {} exec error: {}", path, e)).await;
+                            return Ok(CallToolResult::error(format!("Download failed: {}", e)));
+                        }
                     };
 
                     if result.exit_code != 0 {
-                        return Ok(CallToolResult::error(result.stderr));
+                        let rendered = render_exec_stderr(&result.stderr, &result.notes, "");
+                        audit_event(&reg, task_id, "download_failed", &format!("download {} failed (exit={}): {}", path, result.exit_code, rendered)).await;
+                        return Ok(CallToolResult::error(format!("Download failed: {}", rendered)));
                     }
 
                     let bytes = result.stdout.len();
                     let truncated = bytes >= max_bytes;
+
+                    audit_event(&reg, task_id, "file_downloaded", &format!("download {} bytes (truncated={})", bytes, truncated)).await;
 
                     Ok(CallToolResult::text(json!({
                         "success": true,
