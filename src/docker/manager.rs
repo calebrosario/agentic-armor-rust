@@ -232,7 +232,7 @@ impl ContainerRuntime for BollardRuntime {
     }
 
     async fn create_container(&self, config: &ArmorContainerConfig) -> ArmorResult<String> {
-        let bollard_config = self.build_bollard_config(config)?;
+        let bollard_config = Self::build_bollard_config(config, &self.config)?;
 
         let create_options = CreateContainerOptions {
             name: config.name.clone(),
@@ -411,11 +411,10 @@ impl ContainerRuntime for BollardRuntime {
 
 impl BollardRuntime {
     pub fn build_bollard_config(
-        &self,
         config: &ArmorContainerConfig,
+        runtime_config: &Config,
     ) -> ArmorResult<bollard::container::Config<String>> {
-        if !self
-            .config
+        if !runtime_config
             .allowed_images
             .iter()
             .any(|img| img == &config.image)
@@ -486,19 +485,19 @@ impl BollardRuntime {
             }
         }
 
-        let network_mode = docker_network_mode(&config.network, self.config.allow_host_network)?;
+        let network_mode = docker_network_mode(&config.network, runtime_config.allow_host_network)?;
 
         let memory = config
             .memory_limit
-            .unwrap_or(self.config.container_memory_mb * 1024 * 1024)
+            .unwrap_or(runtime_config.container_memory_mb * 1024 * 1024)
             .max(64 * 1024 * 1024);
         let cpu_shares = config
             .cpu_shares
-            .unwrap_or(self.config.container_cpu_shares)
+            .unwrap_or(runtime_config.container_cpu_shares)
             .clamp(2, 4096);
         let pids_limit = config
             .pids_limit
-            .unwrap_or(self.config.container_pids_limit)
+            .unwrap_or(runtime_config.container_pids_limit)
             .clamp(10, 1000);
 
         let cap_drop = vec!["ALL".to_string()];
