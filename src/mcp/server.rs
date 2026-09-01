@@ -25,8 +25,8 @@ pub async fn start(
     register_task_upload(&server, &runtime, &lifecycle, &config).await;
     register_task_download(&server, &runtime, &lifecycle, &config).await;
     register_task_list(&server, &registry).await;
-    register_task_stop(&server, &runtime, &lifecycle).await;
-    register_task_delete(&server, &runtime, &lifecycle).await;
+    register_task_stop(&server, &runtime, &lifecycle, &registry).await;
+    register_task_delete(&server, &runtime, &lifecycle, &registry).await;
     register_task_logs(&server, &registry).await;
 
     info!("Agentic Armor MCP server starting (8 tools, stdio)");
@@ -534,9 +534,11 @@ async fn register_task_stop(
     server: &Arc<McpServer>,
     runtime: &Arc<dyn ContainerRuntime>,
     lifecycle: &Arc<TaskLifecycle>,
+    registry: &Arc<TaskRegistry>,
 ) {
     let rt = runtime.clone();
     let lc = lifecycle.clone();
+    let reg = registry.clone();
 
     server
         .register_tool(
@@ -550,15 +552,35 @@ async fn register_task_stop(
                 .handler(move |args| {
                     let rt = rt.clone();
                     let lc = lc.clone();
+                    let reg = reg.clone();
                     async move {
                         let task_id = match arg_str(&args, "taskId") {
                             Ok(v) => v,
                             Err(e) => return Ok(CallToolResult::error(e)),
                         };
 
-                        if let Ok(container_id) = lc.get_container_id(task_id).await {
-                            if let Err(e) = rt.stop_container(&container_id, 10).await {
-                                warn!("Failed to stop container {}: {}", container_id, e);
+                        match lc.get_container_id(task_id).await {
+                            Ok(container_id) => {
+                                if let Err(e) = rt.stop_container(&container_id, 10).await {
+                                    let msg = e.to_string().to_lowercase();
+                                    if msg.contains("already stopped")
+                                        || msg.contains("not running")
+                                        || msg.contains("304")
+                                    {
+                                        audit_event(&reg, task_id, "stop_skipped", &format!("container {} already stopped", container_id)).await;
+                                    } else {
+                                        warn!("Failed to stop container {}: {}", container_id, e);
+                                        audit_event(&reg, task_id, "stop_failed", &format!("container {} stop failed ({}): task NOT cancelled — retry task_stop or task_delete", container_id, e)).await;
+                                        return Ok(CallToolResult::error(format!(
+                                            "Failed to stop container {} ({}). The task was NOT cancelled and the container may still be running — retry task_stop or task_delete.",
+                                            container_id, e
+                                        )));
+                                    }
+                                }
+                            }
+                            Err(ArmorError::ContainerNotAssociated(_)) => {}
+                            Err(e) => {
+                                return Ok(CallToolResult::error(format!("Cannot determine container for task: {}", e)));
                             }
                         }
 
@@ -587,9 +609,11 @@ async fn register_task_delete(
     server: &Arc<McpServer>,
     runtime: &Arc<dyn ContainerRuntime>,
     lifecycle: &Arc<TaskLifecycle>,
+    registry: &Arc<TaskRegistry>,
 ) {
     let rt = runtime.clone();
     let lc = lifecycle.clone();
+    let reg = registry.clone();
 
     server.register_tool(
         ToolBuilder::new("task_delete")
@@ -602,6 +626,7 @@ async fn register_task_delete(
             .handler(move |args| {
                 let rt = rt.clone();
                 let lc = lc.clone();
+                let reg = reg.clone();
                 async move {
                     let task_id = match arg_str(&args, "taskId") {
                         Ok(v) => v,
@@ -613,7 +638,17 @@ async fn register_task_delete(
 
                     if let Some(container_id) = container_id.as_deref() {
                         if let Err(e) = rt.destroy_container(container_id).await {
-                            warn!("Failed to destroy container {} for task {}: {} — container may still be running on the host", container_id, task_id, e);
+                            let msg = e.to_string().to_lowercase();
+                            if msg.contains("no such container") || msg.contains("container not found") {
+                                audit_event(&reg, task_id, "destroy_skipped", &format!("container {} already gone", container_id)).await;
+                            } else {
+                                warn!("Failed to destroy container {} for task {}: {} — container may still be running on the host", container_id, task_id, e);
+                                audit_event(&reg, task_id, "destroy_failed", &format!("container {} destroy failed ({}): task row retained — retry task_delete", container_id, e)).await;
+                                return Ok(CallToolResult::error(format!(
+                                    "Failed to destroy container {} ({}). The task row was retained so the container cannot be orphaned — retry task_delete once the runtime is healthy.",
+                                    container_id, e
+                                )));
+                            }
                         }
                     } else {
                         let orphan_name = format!("armor-{}", task_id);
@@ -627,6 +662,7 @@ async fn register_task_delete(
                         let msg = e.to_string().to_lowercase();
                         if !msg.contains("no such network") && !msg.contains("network not found") {
                             warn!("Failed to remove network for task {}: {}", task_id, e);
+                            audit_event(&reg, task_id, "network_remove_failed", &format!("network {} removal failed: {}", task_network_name(task_id), e)).await;
                         }
                     }
 
