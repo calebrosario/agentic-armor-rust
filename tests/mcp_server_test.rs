@@ -609,3 +609,25 @@ fn exec_kill_command_kills_process_group_and_cleans_up() {
         kill[2]
     );
 }
+
+#[test]
+fn test_task_summary_json_status_is_not_debug_quoted() {
+    use agentic_armor::mcp::server::task_summary_json;
+    use agentic_armor::Task;
+
+    let t = Task {
+        id: "t-1".into(),
+        name: "demo".into(),
+        status: "running".into(),
+        owner: Some("agent".into()),
+        metadata: serde_json::json!({}),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+
+    let summary = task_summary_json(&t);
+    assert_eq!(summary["status"].as_str(), Some("running"));
+    assert_eq!(summary["id"].as_str(), Some("t-1"));
+    assert_eq!(summary["owner"].as_str(), Some("agent"));
+    assert_eq!(summary["name"].as_str(), Some("demo"));
+}

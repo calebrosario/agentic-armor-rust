@@ -4,7 +4,7 @@ use crate::docker::{
     ExecRequest, Mount, NetworkConfig,
 };
 use crate::error::{ArmorError, ArmorResult};
-use crate::task::{TaskLifecycle, TaskRegistry};
+use crate::task::{Task, TaskLifecycle, TaskRegistry};
 use mcp_sdk::{CallToolResult, McpServer, StdioTransport, ToolBuilder};
 use serde_json::json;
 use std::sync::Arc;
@@ -500,13 +500,7 @@ async fn register_task_list(server: &Arc<McpServer>, registry: &Arc<TaskRegistry
 
                         Ok(CallToolResult::text(
                             json!({
-                                "tasks": tasks.iter().map(|t| json!({
-                                    "id": t.id,
-                                    "name": t.name,
-                                    "status": format!("{:?}", t.status).to_lowercase(),
-                                    "owner": t.owner,
-                                    "createdAt": t.created_at
-                                })).collect::<Vec<_>>(),
+                                "tasks": tasks.iter().map(task_summary_json).collect::<Vec<_>>(),
                                 "count": tasks.len()
                             })
                             .to_string(),
@@ -759,6 +753,16 @@ pub fn default_task_mounts_for(runtime: &str) -> Vec<Mount> {
             tmpfs_options: Some(opts_for("256m")),
         },
     ]
+}
+
+pub fn task_summary_json(t: &Task) -> serde_json::Value {
+    json!({
+        "id": t.id,
+        "name": t.name,
+        "status": t.status.to_lowercase(),
+        "owner": t.owner,
+        "createdAt": t.created_at
+    })
 }
 
 pub fn is_valid_network_mode(mode: &str) -> bool {
