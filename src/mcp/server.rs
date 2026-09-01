@@ -10,6 +10,8 @@ use serde_json::json;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
+const MAX_CONCURRENT_CONTAINERS: usize = 10;
+
 pub async fn start(
     config: Arc<Config>,
     runtime: Arc<dyn ContainerRuntime>,
@@ -45,6 +47,7 @@ async fn register_task_create(
     let reg = registry.clone();
     let lc = lifecycle.clone();
     let cfg = config.clone();
+    let create_gate = Arc::new(tokio::sync::Mutex::new(()));
 
     server.register_tool(
         ToolBuilder::new("task_create")
@@ -73,6 +76,7 @@ async fn register_task_create(
                 let reg = reg.clone();
                 let lc = lc.clone();
                 let cfg = cfg.clone();
+                let create_gate = create_gate.clone();
                 async move {
                     let task_id = match arg_str(&args, "taskId") {
                         Ok(v) => v,
@@ -121,13 +125,22 @@ async fn register_task_create(
                         return Ok(CallToolResult::error("Image not allowed. Use a pre-approved sandbox image."));
                     }
 
-                    let existing = reg.list(1000).await.unwrap_or_default();
+                    let _create_gate = create_gate.lock().await;
+                    let existing = match reg.list(1000).await {
+                        Ok(tasks) => tasks,
+                        Err(e) => {
+                            return Ok(CallToolResult::error(format!(
+                                "Concurrency check failed (database error) — refusing to create: {}",
+                                e
+                            )))
+                        }
+                    };
                     let active = existing.iter().filter(|t| {
                         matches!(t.status.as_str(), "pending" | "running")
                     }).count();
-                    if active >= 10 {
+                    if active >= MAX_CONCURRENT_CONTAINERS {
                         return Ok(CallToolResult::error(
-                            format!("Maximum concurrent containers (10) reached. Delete existing tasks first. Active: {}", active)
+                            format!("Maximum concurrent containers ({}) reached. Delete existing tasks first. Active: {}", MAX_CONCURRENT_CONTAINERS, active)
                         ));
                     }
 
