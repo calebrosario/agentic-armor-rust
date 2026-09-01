@@ -470,14 +470,7 @@ impl BollardRuntime {
                                 mount.source.to_lowercase()
                             };
                         let target_lower = mount.target.to_lowercase();
-                        let all_patterns: Vec<&str> = vec![
-                            "docker.sock",
-                            "/var/run/docker",
-                            "/run/docker",
-                            "podman.sock",
-                            "/run/podman",
-                        ];
-                        for pattern in all_patterns {
+                        for pattern in &runtime_config.forbidden_mount_patterns {
                             if source_to_check.contains(pattern) || target_lower.contains(pattern) {
                                 warn!(
                                     "Security policy rejected mount '{}:{}'",

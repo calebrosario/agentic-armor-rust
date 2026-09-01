@@ -24,12 +24,19 @@ fn test_allowed_images() {
 #[test]
 fn test_forbidden_mount_patterns() {
     let config = Config::default();
-    assert!(config
-        .forbidden_mount_patterns
-        .contains(&"docker.sock".to_string()));
-    assert!(config
-        .forbidden_mount_patterns
-        .contains(&"/var/run/docker".to_string()));
+    for pattern in [
+        "docker.sock",
+        "/var/run/docker",
+        "/run/docker",
+        "podman.sock",
+        "/run/podman",
+    ] {
+        assert!(
+            config.forbidden_mount_patterns.contains(&pattern.to_string()),
+            "missing forbidden mount pattern: {}",
+            pattern
+        );
+    }
 }
 
 #[test]
