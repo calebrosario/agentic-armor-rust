@@ -490,7 +490,7 @@ impl BollardRuntime {
         let memory = config
             .memory_limit
             .unwrap_or(runtime_config.container_memory_mb * 1024 * 1024)
-            .max(64 * 1024 * 1024);
+            .max(512 * 1024 * 1024);
         let cpu_shares = config
             .cpu_shares
             .unwrap_or(runtime_config.container_cpu_shares)
