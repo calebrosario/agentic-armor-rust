@@ -336,20 +336,45 @@ impl ContainerRuntime for BollardRuntime {
                     _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {
                         warn!("Exec timed out after {}ms — killing pid from {}", timeout_ms, pid_file);
                         let kill_cmd = exec_kill_command(&pid_file);
-                        match self.docker.create_exec(id, CreateExecOptions {
+                        let kill_launched = match self.docker.create_exec(id, CreateExecOptions {
                             cmd: Some(kill_cmd),
                             attach_stdout: Some(true),
                             attach_stderr: Some(false),
                             ..Default::default()
                         }).await {
-                            Ok(kill_exec) => {
-                                if let Err(e) = self.docker.start_exec(&kill_exec.id, None).await {
-                                    warn!("kill exec failed to start after timeout: {}", e);
-                                }
+                            Ok(kill_exec) => self.docker.start_exec(&kill_exec.id, None).await.is_ok(),
+                            Err(e) => {
+                                warn!("kill exec creation failed after timeout: {}", e);
+                                false
                             }
-                            Err(e) => warn!("kill exec creation failed after timeout: {}", e),
+                        };
+                        if !kill_launched {
+                            warn!("kill exec could not be launched after timeout — the payload may still be running");
                         }
-                        exec_notes.push(format!("[agentic-armor] exec timed out after {}ms — the process was killed (SIGKILL) inside the container", timeout_ms));
+                        let mut kill_verified = false;
+                        if kill_launched {
+                            for _ in 0..20 {
+                                match self.docker.inspect_exec(&exec_id).await {
+                                    Ok(inspect) if !inspect.running.unwrap_or(false) => {
+                                        kill_verified = true;
+                                        break;
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        warn!("kill verification inspect failed: {}", e);
+                                        break;
+                                    }
+                                }
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            }
+                        }
+                        exec_notes.push(if kill_verified {
+                            format!("[agentic-armor] exec timed out after {}ms — process-group SIGKILL verified (exec is no longer running)", timeout_ms)
+                        } else if kill_launched {
+                            format!("[agentic-armor] exec timed out after {}ms — SIGKILL was sent but termination could NOT be verified; the payload may still be running inside the container", timeout_ms)
+                        } else {
+                            format!("[agentic-armor] exec timed out after {}ms — the kill command could NOT be delivered; the payload may still be running inside the container", timeout_ms)
+                        });
                     }
                 }
             }

@@ -283,7 +283,13 @@ async fn register_task_exec(
                         }
                     };
 
-                    audit_event(&reg, task_id, "exec_logged", &format!("exec exit={} durMs={}: {}", result.exit_code, result.duration_ms, audit_cmd)).await;
+                    let mut audit_msg = format!("exec exit={} durMs={}", result.exit_code, result.duration_ms);
+                    if result.notes.iter().any(|n| n.contains("timed out")) {
+                        let verified = result.notes.iter().any(|n| n.contains("verified"));
+                        audit_msg.push_str(&format!(" timedOut=true kill={}", if verified { "verified" } else { "unverified" }));
+                    }
+                    audit_msg.push_str(&format!(": {}", audit_cmd));
+                    audit_event(&reg, task_id, "exec_logged", &audit_msg).await;
 
                     let fork_hint = if result.stderr.contains("can't fork")
                         || result.stderr.contains("Cannot fork")
