@@ -132,4 +132,17 @@ fn userns_mode_is_opt_in_and_validated() {
         err,
         agentic_armor::ArmorError::InvalidUsernsMode(_)
     ));
+
+    for weakens in ["host", "private"] {
+        let isolate_off = Config {
+            container_userns_mode: Some(weakens.into()),
+            ..Config::default()
+        };
+        let err = BollardRuntime::build_bollard_config(&base_config(), &isolate_off).unwrap_err();
+        assert!(
+            matches!(err, agentic_armor::ArmorError::InvalidUsernsMode(_)),
+            "'{}' must be rejected: it disables or breaks userns isolation",
+            weakens
+        );
+    }
 }
