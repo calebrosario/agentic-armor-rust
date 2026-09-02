@@ -396,12 +396,13 @@ async fn register_task_upload(
                         }
                     }
 
-                    audit_event(&reg, task_id, "file_uploaded", &format!("upload {} bytes -> {}", content.len(), path)).await;
+                    let audited = audit_event(&reg, task_id, "file_uploaded", &format!("upload {} bytes -> {}", content.len(), path)).await;
 
                     Ok(CallToolResult::text(json!({
                         "success": true,
                         "path": path,
-                        "bytes": content.len()
+                        "bytes": content.len(),
+                        "audited": audited
                     }).to_string()))
                 }
             }),
@@ -481,14 +482,15 @@ async fn register_task_download(
                     let bytes = result.stdout.len();
                     let truncated = bytes >= max_bytes;
 
-                    audit_event(&reg, task_id, "file_downloaded", &format!("download {} bytes (truncated={})", bytes, truncated)).await;
+                    let audited = audit_event(&reg, task_id, "file_downloaded", &format!("download {} -> {} bytes (truncated={})", path, bytes, truncated)).await;
 
                     Ok(CallToolResult::text(json!({
                         "success": true,
                         "path": path,
                         "content": result.stdout,
                         "bytes": bytes,
-                        "truncated": truncated
+                        "truncated": truncated,
+                        "audited": audited
                     }).to_string()))
                 }
             }),
@@ -954,12 +956,16 @@ pub fn npm_scripts_blocked_env(blocked: bool) -> Option<Vec<String>> {
     }
 }
 
-async fn audit_event(reg: &TaskRegistry, task_id: &str, event_type: &str, message: &str) {
-    if let Err(e) = reg.add_event(task_id, event_type, message).await {
-        warn!(
-            "AUDIT WRITE FAILED for task {} ({}): {} — audit trail is incomplete",
-            task_id, event_type, e
-        );
+async fn audit_event(reg: &TaskRegistry, task_id: &str, event_type: &str, message: &str) -> bool {
+    match reg.add_event(task_id, event_type, message).await {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(
+                "AUDIT WRITE FAILED for task {} ({}): {} — audit trail is incomplete",
+                task_id, event_type, e
+            );
+            false
+        }
     }
 }
 

@@ -33,15 +33,12 @@ async fn main() -> Result<(), ArmorError> {
         return Err(e);
     }
 
-    if let Err(e) = std::fs::create_dir_all("./data") {
-        tracing::warn!("Could not create ./data directory: {}", e);
+    if let Err(e) = agentic_armor::config::validate_database_url(&config.database_url) {
+        return Err(ArmorError::Database(e));
     }
 
-    if !config.database_url.starts_with("sqlite:") {
-        return Err(ArmorError::Database(format!(
-            "DATABASE_URL must be a sqlite: URL, got {:?}",
-            config.database_url
-        )));
+    if let Err(e) = std::fs::create_dir_all("./data") {
+        tracing::warn!("Could not create ./data directory: {}", e);
     }
     let db_options = sqlx::sqlite::SqliteConnectOptions::from_str(&config.database_url)
         .map_err(|e| ArmorError::Database(e.to_string()))?

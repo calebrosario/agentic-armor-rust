@@ -52,3 +52,19 @@ fn test_allowed_path_prefixes() {
         .allowed_path_prefixes
         .contains(&"/workspace/".to_string()));
 }
+
+#[test]
+fn database_url_must_be_a_sqlite_url() {
+    use agentic_armor::config::validate_database_url;
+    assert!(validate_database_url("sqlite:./data/agentic_armor.db").is_ok());
+    assert!(validate_database_url("sqlite::memory:").is_ok());
+    for bad in [
+        "postgresql://host/db",
+        "postgres://host/db",
+        "mysql://host/db",
+        "",
+        "./data/x.db",
+    ] {
+        assert!(validate_database_url(bad).is_err(), "'{bad}' must be rejected");
+    }
+}

@@ -80,3 +80,11 @@ impl Default for Config {
         }
     }
 }
+
+pub fn validate_database_url(url: &str) -> Result<(), String> {
+    if url.starts_with("sqlite:") {
+        Ok(())
+    } else {
+        Err(format!("DATABASE_URL must be a sqlite: URL, got {:?}", url))
+    }
+}
