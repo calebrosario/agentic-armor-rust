@@ -533,6 +533,12 @@ impl BollardRuntime {
         let userns_mode = match runtime_config.container_userns_mode.as_deref() {
             None | Some("") => None,
             Some(mode) => {
+                if mode == "host" || mode == "private" {
+                    return Err(ArmorError::InvalidUsernsMode(format!(
+                        "'{}' disables or breaks user-namespace isolation — use a daemon remap name or 'auto' (Podman)",
+                        mode
+                    )));
+                }
                 let valid = mode.len() <= 64
                     && mode.chars().all(|c| {
                         c.is_ascii_lowercase()
