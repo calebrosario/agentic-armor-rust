@@ -58,7 +58,7 @@ Every container created by Agentic Armor is hardened — **non-overridable by de
 | Image selection | Allowlist only | ❌ Enforced at runtime layer |
 | Memory | 512MB minimum | ❌ Clamped (never 0) |
 | Process limit | 100 PIDs | ❌ Clamped (10-1000) |
-| Max concurrent containers | 10 | ❌ DoS protection |
+| Max concurrent containers | 10 | ❌ DoS protection (serialized within one armor process; multiple armor processes sharing one `DATABASE_URL` each get their own count) |
 | Path access (upload/download) | `/tmp/`, `/home/opencode/`, `/workspace/` only | ❌ Prefix + char allowlist |
 | Mount validation | Canonicalized paths + forbidden patterns | ❌ Symlink-aware |
 
