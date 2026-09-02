@@ -126,8 +126,8 @@ async fn register_task_create(
                     }
 
                     let _create_gate = create_gate.lock().await;
-                    let existing = match reg.list(1000).await {
-                        Ok(tasks) => tasks,
+                    let active = match reg.count_active().await {
+                        Ok(n) => n as usize,
                         Err(e) => {
                             return Ok(CallToolResult::error(format!(
                                 "Concurrency check failed (database error) — refusing to create: {}",
@@ -135,9 +135,6 @@ async fn register_task_create(
                             )))
                         }
                     };
-                    let active = existing.iter().filter(|t| {
-                        matches!(t.status.as_str(), "pending" | "running")
-                    }).count();
                     if active >= MAX_CONCURRENT_CONTAINERS {
                         return Ok(CallToolResult::error(
                             format!("Maximum concurrent containers ({}) reached. Delete existing tasks first. Active: {}", MAX_CONCURRENT_CONTAINERS, active)
@@ -148,6 +145,7 @@ async fn register_task_create(
                         Ok(t) => t,
                         Err(e) => return Ok(CallToolResult::error(format!("Task creation failed: {}", e))),
                     };
+                    drop(_create_gate);
 
                     let per_task_network = if network_mode == "bridge" {
                         Some(task_network_name(task_id))

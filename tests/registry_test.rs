@@ -139,3 +139,36 @@ async fn delete_missing_task_is_ok_and_writes_no_phantom_event() {
         "no phantom task_deleted event for unknown tasks"
     );
 }
+
+#[tokio::test]
+async fn count_active_counts_only_pending_and_running() {
+    let (registry, pool) = fresh_registry_with_pool().await;
+    for (id, status) in [
+        ("a", "pending"),
+        ("b", "running"),
+        ("c", "cancelled"),
+        ("d", "completed"),
+        ("e", "failed"),
+    ] {
+        sqlx::query("INSERT INTO tasks (id, name, status) VALUES ($1, 't', $2)")
+            .bind(id)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("insert");
+    }
+    assert_eq!(
+        registry.count_active().await.unwrap(),
+        2,
+        "cancelled/completed/failed must not consume the cap"
+    );
+}
+
+#[tokio::test]
+async fn set_container_id_errors_when_the_task_row_vanished() {
+    let (registry, _pool) = fresh_registry_with_pool().await;
+    assert!(
+        registry.set_container_id("ghost", "abc").await.is_err(),
+        "a zero-row update must error — Ok(()) here is what let the create/delete race orphan a running container"
+    );
+}
