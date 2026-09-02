@@ -652,3 +652,29 @@ fn exec_audit_message_distinguishes_all_three_kill_outcomes() {
         "exec exit=0 durMs=42: echo hi"
     );
 }
+
+#[test]
+fn stop_delete_error_classification_separates_benign_from_real_failures() {
+    use agentic_armor::mcp::server::{is_already_stopped_error, is_no_such_container_error};
+
+    for benign in [
+        "Container already stopped",
+        "container abc is not running",
+        "Docker responded with status code 304: ",
+    ] {
+        assert!(is_already_stopped_error(benign), "'{benign}' is a skip, not a failure");
+    }
+    for real in ["permission denied", "connection refused", "no such container: 304ab9c"] {
+        assert!(
+            !is_already_stopped_error(real),
+            "'{real}' must surface stop_failed, not stop_skipped — note the hex id contains '304'"
+        );
+    }
+    for gone in ["No such container: abc", "container not found: abc"] {
+        assert!(is_no_such_container_error(gone), "'{gone}' is destroy_skipped");
+    }
+    assert!(
+        !is_no_such_container_error("device or resource busy"),
+        "real destroy failures must retain the row"
+    );
+}

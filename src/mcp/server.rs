@@ -577,11 +577,7 @@ async fn register_task_stop(
                         match lc.get_container_id(task_id).await {
                             Ok(container_id) => {
                                 if let Err(e) = rt.stop_container(&container_id, 10).await {
-                                    let msg = e.to_string().to_lowercase();
-                                    if msg.contains("already stopped")
-                                        || msg.contains("not running")
-                                        || msg.contains("304")
-                                    {
+                                    if is_already_stopped_error(&e.to_string()) {
                                         audit_event(&reg, task_id, "stop_skipped", &format!("container {} already stopped", container_id)).await;
                                     } else {
                                         warn!("Failed to stop container {}: {}", container_id, e);
@@ -649,12 +645,15 @@ async fn register_task_delete(
                     };
 
                     let container_id = lc.get_container_id(task_id).await.ok();
-                    let had_task = lc.get_task(task_id).await.is_ok();
+                    let had_task = match lc.get_task(task_id).await {
+                        Ok(_) => true,
+                        Err(ArmorError::TaskNotFound(_)) => false,
+                        Err(_) => true,
+                    };
 
                     if let Some(container_id) = container_id.as_deref() {
                         if let Err(e) = rt.destroy_container(container_id).await {
-                            let msg = e.to_string().to_lowercase();
-                            if msg.contains("no such container") || msg.contains("container not found") {
+                            if is_no_such_container_error(&e.to_string()) {
                                 audit_event(&reg, task_id, "destroy_skipped", &format!("container {} already gone", container_id)).await;
                             } else {
                                 warn!("Failed to destroy container {} for task {}: {} — container may still be running on the host", container_id, task_id, e);
@@ -668,8 +667,15 @@ async fn register_task_delete(
                     } else {
                         let orphan_name = format!("armor-{}", task_id);
                         if let Err(e) = rt.destroy_container(&orphan_name).await {
-                            if !e.to_string().to_lowercase().contains("no such container") {
-                                warn!("Failed to clean up potential orphan container {}: {}", orphan_name, e);
+                            if is_no_such_container_error(&e.to_string()) {
+                                audit_event(&reg, task_id, "destroy_skipped", &format!("no container named {} found", orphan_name)).await;
+                            } else {
+                                warn!("Failed to destroy orphan-named container {} for task {}: {}", orphan_name, task_id, e);
+                                audit_event(&reg, task_id, "destroy_failed", &format!("orphan-named container {} destroy failed ({}): task row retained — retry task_delete", orphan_name, e)).await;
+                                return Ok(CallToolResult::error(format!(
+                                    "Failed to destroy container {} ({}). The task row was retained so a live container cannot be orphaned — retry task_delete once the runtime is healthy.",
+                                    orphan_name, e
+                                )));
                             }
                         }
                     }
@@ -833,6 +839,16 @@ pub fn task_summary_json(t: &Task) -> serde_json::Value {
         "owner": t.owner,
         "createdAt": t.created_at
     })
+}
+
+pub fn is_already_stopped_error(err: &str) -> bool {
+    let m = err.to_lowercase();
+    m.contains("already stopped") || m.contains("not running") || m.contains("status code 304")
+}
+
+pub fn is_no_such_container_error(err: &str) -> bool {
+    let m = err.to_lowercase();
+    m.contains("no such container") || m.contains("container not found")
 }
 
 pub fn is_valid_network_mode(mode: &str) -> bool {
