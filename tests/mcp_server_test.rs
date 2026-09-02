@@ -631,3 +631,24 @@ fn test_task_summary_json_status_is_not_debug_quoted() {
     assert_eq!(summary["owner"].as_str(), Some("agent"));
     assert_eq!(summary["name"].as_str(), Some("demo"));
 }
+
+#[test]
+fn exec_audit_message_distinguishes_all_three_kill_outcomes() {
+    use agentic_armor::mcp::server::exec_audit_message;
+
+    let verified =
+        "[agentic-armor] exec timed out after 5000ms — timeout kill confirmed: the exec is no longer running".to_string();
+    let unverified = "[agentic-armor] exec timed out after 5000ms — SIGKILL was sent but termination could NOT be verified; the payload may still be running inside the container".to_string();
+    let undeliverable = "[agentic-armor] exec timed out after 5000ms — the kill command could NOT be delivered; the payload may still be running inside the container".to_string();
+
+    assert!(exec_audit_message(137, 5100, &[verified], "sleep 60").contains("kill=verified"));
+    assert!(
+        exec_audit_message(137, 5100, &[unverified], "sleep 60").contains("kill=unverified"),
+        "the unverified note contains the substring 'verified' — must not be classified as verified"
+    );
+    assert!(exec_audit_message(137, 5100, &[undeliverable], "sleep 60").contains("kill=undeliverable"));
+    assert_eq!(
+        exec_audit_message(0, 42, &[], "echo hi"),
+        "exec exit=0 durMs=42: echo hi"
+    );
+}

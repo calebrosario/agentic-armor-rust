@@ -296,12 +296,7 @@ async fn register_task_exec(
                         }
                     };
 
-                    let mut audit_msg = format!("exec exit={} durMs={}", result.exit_code, result.duration_ms);
-                    if result.notes.iter().any(|n| n.contains("timed out")) {
-                        let verified = result.notes.iter().any(|n| n.contains("verified"));
-                        audit_msg.push_str(&format!(" timedOut=true kill={}", if verified { "verified" } else { "unverified" }));
-                    }
-                    audit_msg.push_str(&format!(": {}", audit_cmd));
+                    let audit_msg = exec_audit_message(result.exit_code, result.duration_ms, &result.notes, &audit_cmd);
                     audit_event(&reg, task_id, "exec_logged", &audit_msg).await;
 
                     let fork_hint = if result.stderr.contains("can't fork")
@@ -994,6 +989,22 @@ pub fn render_exec_stderr(stderr: &str, notes: &[String], fork_hint: &str) -> St
         parts.push(fork_hint.trim().to_string());
     }
     parts.join("\n")
+}
+
+pub fn exec_audit_message(exit_code: i64, duration_ms: u64, notes: &[String], audit_cmd: &str) -> String {
+    let mut msg = format!("exec exit={} durMs={}", exit_code, duration_ms);
+    if let Some(note) = notes.iter().find(|n| n.contains("timed out")) {
+        let outcome = if note.contains("could NOT be delivered") {
+            "undeliverable"
+        } else if note.contains("NOT be verified") {
+            "unverified"
+        } else {
+            "verified"
+        };
+        msg.push_str(&format!(" timedOut=true kill={}", outcome));
+    }
+    msg.push_str(&format!(": {}", audit_cmd));
+    msg
 }
 
 pub fn audit_command(command: &[String]) -> String {
