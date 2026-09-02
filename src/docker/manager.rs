@@ -188,9 +188,11 @@ impl BollardRuntime {
 
 /// Wraps an exec command so the wrapper pid (== process-group id) is recorded to
 /// `pid_file`. The payload runs as a child of the wrapper in the same process group:
-/// on success the pidfile is removed and the exit status propagated; on timeout a
-/// group kill (`kill -9 -PID`) terminates the wrapper, the payload, and any
-/// subprocesses the payload spawned.
+/// on success the pidfile is removed and the exit status propagated. On timeout a
+/// group kill (`kill -9 -PID`) is *attempted* against that group — it is
+/// best-effort, not a guarantee: the caller verifies the outcome and reports it as
+/// confirmed/unverified/undeliverable, and a payload that calls setsid can survive
+/// its process group.
 pub fn exec_wrap_command(pid_file: &str, command: &[String]) -> Vec<String> {
     let mut wrapped = vec![
         "sh".to_string(),
@@ -205,7 +207,9 @@ pub fn exec_wrap_command(pid_file: &str, command: &[String]) -> Vec<String> {
     wrapped
 }
 
-/// Kills the process recorded in `pid_file` (SIGKILL) and removes the file.
+/// Attempts to kill the process group recorded in `pid_file` (SIGKILL) and removes
+/// the file. Best-effort: errors are suppressed inside the command; the caller
+/// verifies whether the exec actually stopped.
 pub fn exec_kill_command(pid_file: &str) -> Vec<String> {
     vec![
         "sh".to_string(),
@@ -353,9 +357,10 @@ impl ContainerRuntime for BollardRuntime {
                         }
                         let mut kill_verified = false;
                         if kill_launched {
-                            for _ in 0..20 {
+                            let poll_deadline = Instant::now() + Duration::from_secs(3);
+                            while Instant::now() < poll_deadline {
                                 match self.docker.inspect_exec(&exec_id).await {
-                                    Ok(inspect) if !inspect.running.unwrap_or(false) => {
+                                    Ok(inspect) if inspect.running == Some(false) => {
                                         kill_verified = true;
                                         break;
                                     }
@@ -369,7 +374,7 @@ impl ContainerRuntime for BollardRuntime {
                             }
                         }
                         exec_notes.push(if kill_verified {
-                            format!("[agentic-armor] exec timed out after {}ms — process-group SIGKILL verified (exec is no longer running)", timeout_ms)
+                            format!("[agentic-armor] exec timed out after {}ms — timeout kill confirmed: the exec is no longer running", timeout_ms)
                         } else if kill_launched {
                             format!("[agentic-armor] exec timed out after {}ms — SIGKILL was sent but termination could NOT be verified; the payload may still be running inside the container", timeout_ms)
                         } else {
@@ -386,8 +391,15 @@ impl ContainerRuntime for BollardRuntime {
             }
         }
 
-        let exec_inspect = self.docker.inspect_exec(&exec_id).await?;
-        let exit_code = exec_inspect.exit_code.unwrap_or(-1);
+        let exit_code = match self.docker.inspect_exec(&exec_id).await {
+            Ok(inspect) => inspect.exit_code.unwrap_or(-1),
+            Err(e) if !exec_notes.is_empty() => {
+                warn!("post-exec inspect failed after notes were recorded: {}", e);
+                exec_notes.push(format!("[agentic-armor] final status unavailable: {}", e));
+                -1
+            }
+            Err(e) => return Err(ArmorError::Docker(e.to_string())),
+        };
         if exit_code < 0 && exec_notes.is_empty() {
             exec_notes.push(
                 "[agentic-armor] exec produced no exit code (killed or still running)".into(),
