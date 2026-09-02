@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::docker::{
     is_pid_exhaustion_error, task_network_name, ArmorContainerConfig, ContainerRuntime,
-    ExecRequest, Mount, NetworkConfig,
+    ExecRequest, KillOutcome, Mount, NetworkConfig,
 };
 use crate::error::{ArmorError, ArmorResult};
 use crate::task::{Task, TaskLifecycle, TaskRegistry};
@@ -294,7 +294,7 @@ async fn register_task_exec(
                         }
                     };
 
-                    let audit_msg = exec_audit_message(result.exit_code, result.duration_ms, &result.notes, &audit_cmd);
+                    let audit_msg = exec_audit_message(result.exit_code, result.duration_ms, result.kill_outcome, &audit_cmd);
                     audit_event(&reg, task_id, "exec_logged", &audit_msg).await;
 
                     let fork_hint = if result.stderr.contains("can't fork")
@@ -1011,17 +1011,18 @@ pub fn render_exec_stderr(stderr: &str, notes: &[String], fork_hint: &str) -> St
     parts.join("\n")
 }
 
-pub fn exec_audit_message(exit_code: i64, duration_ms: u64, notes: &[String], audit_cmd: &str) -> String {
+pub fn exec_audit_message(
+    exit_code: i64,
+    duration_ms: u64,
+    kill_outcome: KillOutcome,
+    audit_cmd: &str,
+) -> String {
     let mut msg = format!("exec exit={} durMs={}", exit_code, duration_ms);
-    if let Some(note) = notes.iter().find(|n| n.contains("timed out")) {
-        let outcome = if note.contains("could NOT be delivered") {
-            "undeliverable"
-        } else if note.contains("NOT be verified") {
-            "unverified"
-        } else {
-            "verified"
-        };
-        msg.push_str(&format!(" timedOut=true kill={}", outcome));
+    if kill_outcome != KillOutcome::NotTimedOut {
+        msg.push_str(&format!(
+            " timedOut=true kill={}",
+            kill_outcome.audit_label()
+        ));
     }
     msg.push_str(&format!(": {}", audit_cmd));
     msg

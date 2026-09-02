@@ -315,6 +315,7 @@ impl ContainerRuntime for BollardRuntime {
         let mut stdout_buf: Vec<u8> = Vec::new();
         let mut stderr_buf: Vec<u8> = Vec::new();
         let mut exec_notes: Vec<String> = Vec::new();
+        let mut kill_outcome = KillOutcome::NotTimedOut;
 
         let start_exec_result = self.docker.start_exec(&exec_id, None).await;
 
@@ -374,10 +375,13 @@ impl ContainerRuntime for BollardRuntime {
                             }
                         }
                         exec_notes.push(if kill_verified {
+                            kill_outcome = KillOutcome::Verified;
                             format!("[agentic-armor] exec timed out after {}ms — timeout kill confirmed: the exec is no longer running", timeout_ms)
                         } else if kill_launched {
+                            kill_outcome = KillOutcome::SentUnverified;
                             format!("[agentic-armor] exec timed out after {}ms — SIGKILL was sent but termination could NOT be verified; the payload may still be running inside the container", timeout_ms)
                         } else {
+                            kill_outcome = KillOutcome::NotDelivered;
                             format!("[agentic-armor] exec timed out after {}ms — the kill command could NOT be delivered; the payload may still be running inside the container", timeout_ms)
                         });
                     }
@@ -412,6 +416,7 @@ impl ContainerRuntime for BollardRuntime {
             stdout: String::from_utf8_lossy(&stdout_buf).to_string(),
             stderr: String::from_utf8_lossy(&stderr_buf).to_string(),
             notes: exec_notes,
+            kill_outcome,
             duration_ms,
         })
     }

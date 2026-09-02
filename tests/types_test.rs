@@ -70,6 +70,7 @@ fn test_exec_result_serialization() {
         stdout: "hello\n".into(),
         stderr: "".into(),
         notes: vec![],
+        kill_outcome: Default::default(),
         duration_ms: 42,
     };
 

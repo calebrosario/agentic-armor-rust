@@ -65,6 +65,9 @@ fn database_url_must_be_a_sqlite_url() {
         "",
         "./data/x.db",
     ] {
-        assert!(validate_database_url(bad).is_err(), "'{bad}' must be rejected");
+        assert!(
+            validate_database_url(bad).is_err(),
+            "'{bad}' must be rejected"
+        );
     }
 }

@@ -63,6 +63,26 @@ pub struct Mount {
     pub tmpfs_options: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum KillOutcome {
+    #[default]
+    NotTimedOut,
+    Verified,
+    SentUnverified,
+    NotDelivered,
+}
+
+impl KillOutcome {
+    pub fn audit_label(&self) -> &'static str {
+        match self {
+            KillOutcome::NotTimedOut => "",
+            KillOutcome::Verified => "verified",
+            KillOutcome::SentUnverified => "unverified",
+            KillOutcome::NotDelivered => "undeliverable",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecResult {
     pub exit_code: i64,
@@ -70,6 +90,8 @@ pub struct ExecResult {
     pub stderr: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    #[serde(default)]
+    pub kill_outcome: KillOutcome,
     pub duration_ms: u64,
 }
 

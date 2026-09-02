@@ -633,26 +633,39 @@ fn test_task_summary_json_status_is_not_debug_quoted() {
 }
 
 #[test]
-fn exec_audit_message_distinguishes_all_three_kill_outcomes() {
+fn exec_audit_message_distinguishes_all_kill_outcomes() {
     use agentic_armor::mcp::server::exec_audit_message;
+    use agentic_armor::KillOutcome;
 
-    let verified =
-        "[agentic-armor] exec timed out after 5000ms — timeout kill confirmed: the exec is no longer running".to_string();
-    let unverified = "[agentic-armor] exec timed out after 5000ms — SIGKILL was sent but termination could NOT be verified; the payload may still be running inside the container".to_string();
-    let undeliverable = "[agentic-armor] exec timed out after 5000ms — the kill command could NOT be delivered; the payload may still be running inside the container".to_string();
-
-    assert!(exec_audit_message(137, 5100, &[verified], "sleep 60").contains("kill=verified"));
     assert!(
-        exec_audit_message(137, 5100, &[unverified], "sleep 60").contains("kill=unverified"),
-        "the unverified note contains the substring 'verified' — must not be classified as verified"
+        exec_audit_message(137, 5100, KillOutcome::Verified, "sleep 60").contains("kill=verified")
     );
-    assert!(exec_audit_message(137, 5100, &[undeliverable], "sleep 60").contains("kill=undeliverable"));
+    assert!(
+        exec_audit_message(137, 5100, KillOutcome::SentUnverified, "sleep 60")
+            .contains("kill=unverified")
+    );
+    assert!(
+        exec_audit_message(137, 5100, KillOutcome::NotDelivered, "sleep 60")
+            .contains("kill=undeliverable")
+    );
     assert_eq!(
-        exec_audit_message(0, 42, &[], "echo hi"),
+        exec_audit_message(0, 42, KillOutcome::NotTimedOut, "echo hi"),
         "exec exit=0 durMs=42: echo hi"
     );
 }
 
+#[test]
+fn stream_errors_containing_timed_out_never_attest_a_kill() {
+    use agentic_armor::mcp::server::exec_audit_message;
+    use agentic_armor::KillOutcome;
+
+    let msg = exec_audit_message(-1, 120_000, KillOutcome::NotTimedOut, "sleep 300");
+    assert!(
+        !msg.contains("kill="),
+        "no timeout fired and no kill was attempted — transport-error text must not attest one: {msg}"
+    );
+    assert!(msg.starts_with("exec exit=-1 durMs=120000:"));
+}
 #[test]
 fn stop_delete_error_classification_separates_benign_from_real_failures() {
     use agentic_armor::mcp::server::{is_already_stopped_error, is_no_such_container_error};
@@ -662,16 +675,26 @@ fn stop_delete_error_classification_separates_benign_from_real_failures() {
         "container abc is not running",
         "Docker responded with status code 304: ",
     ] {
-        assert!(is_already_stopped_error(benign), "'{benign}' is a skip, not a failure");
+        assert!(
+            is_already_stopped_error(benign),
+            "'{benign}' is a skip, not a failure"
+        );
     }
-    for real in ["permission denied", "connection refused", "no such container: 304ab9c"] {
+    for real in [
+        "permission denied",
+        "connection refused",
+        "no such container: 304ab9c",
+    ] {
         assert!(
             !is_already_stopped_error(real),
             "'{real}' must surface stop_failed, not stop_skipped — note the hex id contains '304'"
         );
     }
     for gone in ["No such container: abc", "container not found: abc"] {
-        assert!(is_no_such_container_error(gone), "'{gone}' is destroy_skipped");
+        assert!(
+            is_no_such_container_error(gone),
+            "'{gone}' is destroy_skipped"
+        );
     }
     assert!(
         !is_no_such_container_error("device or resource busy"),
