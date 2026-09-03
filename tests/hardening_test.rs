@@ -198,3 +198,21 @@ fn forbidden_mount_patterns_are_read_from_config_not_hardcoded() {
     };
     assert!(BollardRuntime::build_bollard_config(&via_target, &Config::default()).is_err());
 }
+
+#[test]
+fn internal_egress_flag_reaches_network_creation() {
+    use agentic_armor::config::TaskNetworkEgress;
+    let internal = agentic_armor::docker::BollardRuntime::network_create_options(
+        "armor-t1",
+        TaskNetworkEgress::Internal,
+    );
+    assert!(
+        internal.internal,
+        "internal egress must set the docker flag"
+    );
+    let masquerade = agentic_armor::docker::BollardRuntime::network_create_options(
+        "armor-t1",
+        TaskNetworkEgress::Masquerade,
+    );
+    assert!(!masquerade.internal);
+}

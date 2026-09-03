@@ -435,13 +435,8 @@ impl ContainerRuntime for BollardRuntime {
         {
             return Ok(());
         }
-        self.docker
-            .create_network(bollard::network::CreateNetworkOptions {
-                name: name.to_string(),
-                check_duplicate: true,
-                ..Default::default()
-            })
-            .await?;
+        let options = Self::network_create_options(name, self.config.task_network_egress.clone());
+        self.docker.create_network(options).await?;
         Ok(())
     }
 
@@ -452,6 +447,21 @@ impl ContainerRuntime for BollardRuntime {
 }
 
 impl BollardRuntime {
+    pub fn network_create_options(
+        name: &str,
+        egress: crate::config::TaskNetworkEgress,
+    ) -> bollard::network::CreateNetworkOptions<String> {
+        let mut options = bollard::network::CreateNetworkOptions {
+            name: name.to_string(),
+            check_duplicate: true,
+            ..Default::default()
+        };
+        if egress == crate::config::TaskNetworkEgress::Internal {
+            options.internal = true;
+        }
+        options
+    }
+
     pub fn build_bollard_config(
         config: &ArmorContainerConfig,
         runtime_config: &Config,

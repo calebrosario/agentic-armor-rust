@@ -18,6 +18,26 @@ impl RuntimeChoice {
     }
 }
 
+/// Per-task network egress policy. `Masquerade` is stock Docker NAT (the
+/// S08 bridge-exfil boundary is by-design). `Internal` creates per-task
+/// networks with internal=true: no outbound routing at all, so egress fails
+/// closed instead of relying on agent cooperation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum TaskNetworkEgress {
+    #[default]
+    Masquerade,
+    Internal,
+}
+
+impl TaskNetworkEgress {
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "internal" => TaskNetworkEgress::Internal,
+            _ => TaskNetworkEgress::Masquerade,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub database_url: String,
@@ -26,6 +46,7 @@ pub struct Config {
     pub container_cpu_shares: i64,
     pub container_pids_limit: i64,
     pub allow_host_network: bool,
+    pub task_network_egress: TaskNetworkEgress,
     pub container_runtime: RuntimeChoice,
     pub podman_socket: Option<String>,
     pub container_userns_mode: Option<String>,
@@ -55,6 +76,9 @@ impl Default for Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(100),
             allow_host_network: env::var("ALLOW_HOST_NETWORK").as_deref() == Ok("true"),
+            task_network_egress: TaskNetworkEgress::parse(
+                &env::var("TASK_NETWORK_EGRESS").unwrap_or_default(),
+            ),
             container_runtime: RuntimeChoice::parse(
                 &env::var("CONTAINER_RUNTIME").unwrap_or_default(),
             ),

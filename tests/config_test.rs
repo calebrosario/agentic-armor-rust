@@ -82,3 +82,21 @@ fn tombstone_path_lives_next_to_the_database() {
     let bare = agentic_armor::config::tombstone_path_for("sqlite:x.db");
     assert_eq!(bare, std::path::PathBuf::from("./tombstones.jsonl"));
 }
+
+#[test]
+fn task_network_egress_parses() {
+    use agentic_armor::config::TaskNetworkEgress;
+    assert_eq!(
+        TaskNetworkEgress::parse("internal"),
+        TaskNetworkEgress::Internal
+    );
+    assert_eq!(
+        TaskNetworkEgress::parse("Masquerade"),
+        TaskNetworkEgress::Masquerade
+    );
+    assert_eq!(
+        TaskNetworkEgress::parse("bogus"),
+        TaskNetworkEgress::Masquerade,
+        "unknown values must fail open to the audited default, not to lockdown"
+    );
+}
