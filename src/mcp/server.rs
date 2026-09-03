@@ -5,12 +5,113 @@ use crate::docker::{
 };
 use crate::error::{ArmorError, ArmorResult};
 use crate::task::{Task, TaskLifecycle, TaskRegistry};
+use chrono::Utc;
 use mcp_sdk::{CallToolResult, McpServer, StdioTransport, ToolBuilder};
 use serde_json::json;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use tracing::{error, info, warn};
 
 const MAX_CONCURRENT_CONTAINERS: usize = 10;
+
+static TOMBSTONE_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Tombstone {
+    ts: String,
+    task_id: String,
+    event_type: String,
+    message: String,
+}
+
+fn write_tombstone(path: &Path, task_id: &str, event_type: &str, message: &str) {
+    use std::io::Write;
+    let entry = Tombstone {
+        ts: Utc::now().to_rfc3339(),
+        task_id: task_id.to_string(),
+        event_type: event_type.to_string(),
+        message: message.to_string(),
+    };
+    let line = match serde_json::to_string(&entry) {
+        Ok(line) => line,
+        Err(e) => {
+            warn!(
+                "TOMBSTONE SERIALIZE FAILED for task {} ({}): {} — this audit event is lost",
+                task_id, event_type, e
+            );
+            return;
+        }
+    };
+    let attempt = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| writeln!(file, "{}", line));
+    if let Err(e) = attempt {
+        warn!(
+            "TOMBSTONE WRITE FAILED for task {} ({}): {} — this audit event is lost",
+            task_id, event_type, e
+        );
+    }
+}
+
+/// Replays tombstoned audit events into the database at boot. Fully replayed
+/// and unparseable lines are removed (the latter cannot become evidence);
+/// lines whose database insert failed are kept for the next boot.
+pub async fn replay_tombstones(registry: &TaskRegistry, path: &Path) -> usize {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(e) => {
+            warn!(
+                "Tombstone read failed ({}): {} — keeping file for next boot",
+                path.display(),
+                e
+            );
+            return 0;
+        }
+    };
+    let mut replayed = 0usize;
+    let mut retained: Vec<String> = Vec::new();
+    for line in content.lines().filter(|l| !l.trim().is_empty()) {
+        match serde_json::from_str::<Tombstone>(line) {
+            Ok(tombstone) => {
+                let message = format!(
+                    "[replayed from tombstone, originally recorded {}] {}",
+                    tombstone.ts, tombstone.message
+                );
+                match registry
+                    .add_event(&tombstone.task_id, &tombstone.event_type, &message)
+                    .await
+                {
+                    Ok(()) => replayed += 1,
+                    Err(e) => {
+                        warn!(
+                            "Tombstone replay insert failed for task {} ({}): {} — kept for next boot",
+                            tombstone.task_id, tombstone.event_type, e
+                        );
+                        retained.push(line.to_string());
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Dropping unparseable tombstone line: {}", e);
+            }
+        }
+    }
+    if retained.is_empty() {
+        let _ = std::fs::remove_file(path);
+    } else if let Err(e) = std::fs::write(path, format!("{}\n", retained.join("\n"))) {
+        warn!("Tombstone rewrite failed ({}): {}", path.display(), e);
+    }
+    if replayed > 0 {
+        info!(
+            "Recovered {} audit events that were written while the database was unavailable",
+            replayed
+        );
+    }
+    replayed
+}
 
 pub async fn start(
     config: Arc<Config>,
@@ -18,6 +119,7 @@ pub async fn start(
     registry: Arc<TaskRegistry>,
     lifecycle: Arc<TaskLifecycle>,
 ) -> ArmorResult<()> {
+    let _ = TOMBSTONE_PATH.set(config.tombstone_path.clone());
     let server = Arc::new(McpServer::new("agentic-armor", "0.4.0"));
 
     register_task_create(&server, &config, &runtime, &registry, &lifecycle).await;
@@ -971,9 +1073,12 @@ async fn audit_event(reg: &TaskRegistry, task_id: &str, event_type: &str, messag
         Ok(()) => true,
         Err(e) => {
             warn!(
-                "AUDIT WRITE FAILED for task {} ({}): {} — audit trail is incomplete",
+                "AUDIT WRITE FAILED for task {} ({}): {} — parking in tombstone file",
                 task_id, event_type, e
             );
+            if let Some(path) = TOMBSTONE_PATH.get() {
+                write_tombstone(path, task_id, event_type, message);
+            }
             false
         }
     }

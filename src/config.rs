@@ -32,13 +32,15 @@ pub struct Config {
     pub allowed_images: Vec<String>,
     pub allowed_path_prefixes: Vec<String>,
     pub forbidden_mount_patterns: Vec<String>,
+    pub tombstone_path: std::path::PathBuf,
 }
 
 impl Default for Config {
     fn default() -> Self {
+        let database_url =
+            env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:./data/agentic_armor.db".into());
         Config {
-            database_url: env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "sqlite:./data/agentic_armor.db".into()),
+            database_url: database_url.clone(),
             docker_socket: env::var("DOCKER_SOCKET").ok(),
             container_memory_mb: env::var("CONTAINER_MEMORY_MB")
                 .ok()
@@ -77,8 +79,24 @@ impl Default for Config {
                 "podman.sock".into(),
                 "/run/podman".into(),
             ],
+            tombstone_path: tombstone_path_for(&database_url),
         }
     }
+}
+
+/// Where audit events that could not be written to the database are parked
+/// (`tombstones.jsonl` beside the database file) until the next boot replays
+/// them.
+pub fn tombstone_path_for(database_url: &str) -> std::path::PathBuf {
+    let file = database_url
+        .strip_prefix("sqlite://")
+        .or_else(|| database_url.strip_prefix("sqlite:"))
+        .unwrap_or(database_url);
+    let parent = std::path::Path::new(file)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    parent.join("tombstones.jsonl")
 }
 
 pub fn validate_database_url(url: &str) -> Result<(), String> {

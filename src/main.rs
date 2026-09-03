@@ -57,6 +57,14 @@ async fn main() -> Result<(), ArmorError> {
         .map_err(|e| ArmorError::Database(e.to_string()))?;
     info!("Database ready: {}", config.database_url);
 
+    let replayed = agentic_armor::mcp::replay_tombstones(&registry, &config.tombstone_path).await;
+    if replayed > 0 {
+        info!(
+            "Recovered {} audit events written while the database was unavailable",
+            replayed
+        );
+    }
+
     let lifecycle = Arc::new(TaskLifecycle::new(registry.clone()));
 
     agentic_armor::mcp::start(config, runtime, registry, lifecycle).await?;

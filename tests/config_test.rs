@@ -71,3 +71,14 @@ fn database_url_must_be_a_sqlite_url() {
         );
     }
 }
+
+#[test]
+fn tombstone_path_lives_next_to_the_database() {
+    let nested = agentic_armor::config::tombstone_path_for("sqlite://var/lib/armor/x.db");
+    assert_eq!(
+        nested,
+        std::path::PathBuf::from("var/lib/armor/tombstones.jsonl")
+    );
+    let bare = agentic_armor::config::tombstone_path_for("sqlite:x.db");
+    assert_eq!(bare, std::path::PathBuf::from("./tombstones.jsonl"));
+}
