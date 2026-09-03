@@ -156,8 +156,8 @@ async fn register_task_create(
                     if let Some(net) = &per_task_network {
                         if let Err(e) = rt.create_network(net).await {
                             error!("Network creation failed for task {}: {}", task_id, e);
-                            rollback_task_create(&rt, &lc, task_id, None, None).await;
-                            return Ok(CallToolResult::error(format!("Network creation failed: {}", e)));
+                            let cleaned = rollback_task_create(&rt, &reg, &lc, task_id, None, None).await;
+                            return Ok(CallToolResult::error(format!("Network creation failed: {}{}", e, cleanup_warning(cleaned))));
                         }
                     }
 
@@ -196,21 +196,21 @@ async fn register_task_create(
                         }
                         Err(e) => {
                             error!("Container creation failed for task {}: {}", task_id, e);
-                            rollback_task_create(&rt, &lc, task_id, None, per_task_network.as_deref()).await;
-                            return Ok(CallToolResult::error(format!("Container creation failed: {}", e)));
+                            let cleaned = rollback_task_create(&rt, &reg, &lc, task_id, None, per_task_network.as_deref()).await;
+                            return Ok(CallToolResult::error(format!("Container creation failed: {}{}", e, cleanup_warning(cleaned))));
                         }
                     };
 
                     if let Err(e) = rt.start_container(&container_id).await {
                         error!("Container start failed for {}: {}", container_id, e);
-                        rollback_task_create(&rt, &lc, task_id, Some(&container_id), per_task_network.as_deref()).await;
-                        return Ok(CallToolResult::error(format!("Container start failed: {}", e)));
+                        let cleaned = rollback_task_create(&rt, &reg, &lc, task_id, Some(&container_id), per_task_network.as_deref()).await;
+                        return Ok(CallToolResult::error(format!("Container start failed: {}{}", e, cleanup_warning(cleaned))));
                     }
 
                     if let Err(e) = reg.set_container_id(task_id, &container_id).await {
                         error!("Failed to persist containerId: {}", e);
-                        rollback_task_create(&rt, &lc, task_id, Some(&container_id), per_task_network.as_deref()).await;
-                        return Ok(CallToolResult::error(format!("Failed to associate container: {}", e)));
+                        let cleaned = rollback_task_create(&rt, &reg, &lc, task_id, Some(&container_id), per_task_network.as_deref()).await;
+                        return Ok(CallToolResult::error(format!("Failed to associate container: {}{}", e, cleanup_warning(cleaned))));
                     }
 
                     audit_event(&reg, task_id, "container_created", &format!("Container {} started", container_id)).await;
@@ -651,32 +651,20 @@ async fn register_task_delete(
                         Err(_) => true,
                     };
 
-                    if let Some(container_id) = container_id.as_deref() {
-                        if let Err(e) = rt.destroy_container(container_id).await {
-                            if is_no_such_container_error(&e.to_string()) {
-                                audit_event(&reg, task_id, "destroy_skipped", &format!("container {} already gone", container_id)).await;
-                            } else {
-                                warn!("Failed to destroy container {} for task {}: {} — container may still be running on the host", container_id, task_id, e);
-                                audit_event(&reg, task_id, "destroy_failed", &format!("container {} destroy failed ({}): task row retained — retry task_delete", container_id, e)).await;
-                                return Ok(CallToolResult::error(format!(
-                                    "Failed to destroy container {} ({}). The task row was retained so the container cannot be orphaned — retry task_delete once the runtime is healthy.",
-                                    container_id, e
-                                )));
-                            }
-                        }
-                    } else {
-                        let orphan_name = format!("armor-{}", task_id);
-                        if let Err(e) = rt.destroy_container(&orphan_name).await {
-                            if is_no_such_container_error(&e.to_string()) {
-                                audit_event(&reg, task_id, "destroy_skipped", &format!("no container named {} found", orphan_name)).await;
-                            } else {
-                                warn!("Failed to destroy orphan-named container {} for task {}: {}", orphan_name, task_id, e);
-                                audit_event(&reg, task_id, "destroy_failed", &format!("orphan-named container {} destroy failed ({}): task row retained — retry task_delete", orphan_name, e)).await;
-                                return Ok(CallToolResult::error(format!(
-                                    "Failed to destroy container {} ({}). The task row was retained so a live container cannot be orphaned — retry task_delete once the runtime is healthy.",
-                                    orphan_name, e
-                                )));
-                            }
+                    let destroy_target = match container_id.as_deref() {
+                        Some(cid) => cid.to_string(),
+                        None => format!("armor-{}", task_id),
+                    };
+                    if let Err(e) = rt.destroy_container(&destroy_target).await {
+                        if is_no_such_container_error(&e.to_string()) {
+                            audit_event(&reg, task_id, "destroy_skipped", &format!("container {} already gone", destroy_target)).await;
+                        } else {
+                            warn!("Failed to destroy container {} for task {}: {} — container may still be running on the host", destroy_target, task_id, e);
+                            audit_event(&reg, task_id, "destroy_failed", &format!("container {} destroy failed ({}): task row retained — retry task_delete", destroy_target, e)).await;
+                            return Ok(CallToolResult::error(format!(
+                                "Failed to destroy container {} ({}). The task row was retained so the container cannot be orphaned — retry task_delete once the runtime is healthy.",
+                                destroy_target, e
+                            )));
                         }
                     }
                     if let Err(e) = rt.remove_network(&task_network_name(task_id)).await {
@@ -759,17 +747,21 @@ async fn register_task_logs(server: &Arc<McpServer>, registry: &Arc<TaskRegistry
 
 async fn rollback_task_create(
     rt: &Arc<dyn ContainerRuntime>,
+    reg: &TaskRegistry,
     lc: &TaskLifecycle,
     task_id: &str,
     container_id: Option<&str>,
     network_name: Option<&str>,
-) {
+) -> bool {
+    let mut fully_cleaned = true;
     if let Some(cid) = container_id {
         if let Err(e) = rt.destroy_container(cid).await {
             warn!(
                 "Rollback: container destroy failed for {}: {} — container may remain on host",
                 cid, e
             );
+            audit_event(reg, task_id, "destroy_failed", &format!("rollback: container {} destroy failed ({}): container may remain on host — run task_delete {} to clean it up", cid, e, task_id)).await;
+            fully_cleaned = false;
         }
     }
     if let Some(net) = network_name {
@@ -778,10 +770,28 @@ async fn rollback_task_create(
                 "Rollback: network removal failed for {}: {} — orphaned network, remove manually",
                 net, e
             );
+            audit_event(
+                reg,
+                task_id,
+                "network_remove_failed",
+                &format!("rollback: network {} removal failed: {}", net, e),
+            )
+            .await;
+            fully_cleaned = false;
         }
     }
     if let Err(e) = lc.delete_task(task_id).await {
         error!("Rollback failed: task {} row not removed ({}) — it now counts toward the concurrency cap; delete it manually", task_id, e);
+        fully_cleaned = false;
+    }
+    fully_cleaned
+}
+
+fn cleanup_warning(fully_cleaned: bool) -> &'static str {
+    if fully_cleaned {
+        ""
+    } else {
+        " (rollback incomplete: a container or network may remain on the host — run task_delete to clean it up)"
     }
 }
 
