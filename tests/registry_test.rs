@@ -172,3 +172,101 @@ async fn set_container_id_errors_when_the_task_row_vanished() {
         "a zero-row update must error — Ok(()) here is what let the create/delete race orphan a running container"
     );
 }
+
+#[tokio::test]
+async fn fresh_events_have_monotonic_seq() {
+    let (registry, _pool) = fresh_registry_with_pool().await;
+    registry
+        .create("seq-task", "seq probe", None)
+        .await
+        .expect("create");
+    for i in 0..3 {
+        registry
+            .add_event("seq-task", "info", &format!("event {}", i))
+            .await
+            .expect("add event");
+    }
+    let logs = registry.get_logs("seq-task", 10).await.expect("logs");
+    assert_eq!(logs.len(), 3);
+    assert!(
+        logs[0].seq > logs[1].seq && logs[1].seq > logs[2].seq,
+        "seq must be strictly monotonic in insertion order, got {:?}",
+        logs.iter().map(|e| e.seq).collect::<Vec<_>>()
+    );
+    assert!(logs[0].seq >= 1, "seq starts at 1");
+}
+
+#[tokio::test]
+async fn v1_events_table_upgraded_with_seq_preserving_rows() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("in-memory pool");
+    sqlx::query(
+        "CREATE TABLE tasks (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            owner TEXT,
+            metadata TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("tasks table");
+    sqlx::query(
+        "CREATE TABLE task_events (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            level TEXT NOT NULL DEFAULT 'info',
+            message TEXT,
+            data TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("v1 task_events");
+    sqlx::query("INSERT INTO tasks (id, name) VALUES ('t1', 'legacy')")
+        .execute(&pool)
+        .await
+        .expect("task row");
+    for i in 0..3 {
+        sqlx::query("INSERT INTO task_events (id, task_id, event_type, message) VALUES ($1, 't1', 'info', $2)")
+            .bind(format!("e{}", i))
+            .bind(format!("legacy {}", i))
+            .execute(&pool)
+            .await
+            .expect("event row");
+    }
+    let registry = TaskRegistry::new(pool.clone());
+    registry.migrate().await.expect("migrate upgrades v1");
+    let ddl = table_ddl(&pool, "task_events").await;
+    assert!(
+        ddl.contains("AUTOINCREMENT"),
+        "upgraded table must carry AUTOINCREMENT seq"
+    );
+    let logs = registry.get_logs("t1", 10).await.expect("logs");
+    assert_eq!(logs.len(), 3, "all pre-migration rows survive");
+    assert!(
+        logs.windows(2).all(|w| w[0].seq > w[1].seq),
+        "replayed rows get monotonic seq"
+    );
+    registry.migrate().await.expect("second migrate");
+    let logs2 = registry.get_logs("t1", 10).await.expect("logs2");
+    assert_eq!(logs2.len(), 3, "idempotent rebuild keeps rows");
+}
+
+#[tokio::test]
+async fn user_version_records_schema_v2() {
+    let (_registry, pool) = fresh_registry_with_pool().await;
+    let version: i32 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&pool)
+        .await
+        .expect("user_version");
+    assert_eq!(version, 2, "migrate must stamp user_version=2");
+}

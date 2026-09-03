@@ -81,3 +81,22 @@ fn test_exec_result_serialization() {
     assert!(back.notes.is_empty());
     assert_eq!(back.duration_ms, 42);
 }
+
+#[test]
+fn task_event_serializes_seq_additively() {
+    let ev = agentic_armor::task::TaskEvent {
+        seq: 42,
+        id: "evt-1".into(),
+        task_id: "t-1".into(),
+        event_type: "info".into(),
+        level: "info".into(),
+        message: Some("hello".into()),
+        data: None,
+        created_at: chrono::Utc::now(),
+    };
+    let json = serde_json::to_value(&ev).expect("serialize");
+    assert_eq!(
+        json["seq"], 42,
+        "seq must be serialized for evidence ordering"
+    );
+}
