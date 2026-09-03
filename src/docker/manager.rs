@@ -188,9 +188,11 @@ impl BollardRuntime {
 
 /// Wraps an exec command so the wrapper pid (== process-group id) is recorded to
 /// `pid_file`. The payload runs as a child of the wrapper in the same process group:
-/// on success the pidfile is removed and the exit status propagated; on timeout a
-/// group kill (`kill -9 -PID`) terminates the wrapper, the payload, and any
-/// subprocesses the payload spawned.
+/// on success the pidfile is removed and the exit status propagated. On timeout a
+/// group kill (`kill -9 -PID`) is *attempted* against that group — it is
+/// best-effort, not a guarantee: the caller verifies the outcome and reports it as
+/// confirmed/unverified/undeliverable, and a payload that calls setsid can survive
+/// its process group.
 pub fn exec_wrap_command(pid_file: &str, command: &[String]) -> Vec<String> {
     let mut wrapped = vec![
         "sh".to_string(),
@@ -205,7 +207,9 @@ pub fn exec_wrap_command(pid_file: &str, command: &[String]) -> Vec<String> {
     wrapped
 }
 
-/// Kills the process recorded in `pid_file` (SIGKILL) and removes the file.
+/// Attempts to kill the process group recorded in `pid_file` (SIGKILL) and removes
+/// the file. Best-effort: errors are suppressed inside the command; the caller
+/// verifies whether the exec actually stopped.
 pub fn exec_kill_command(pid_file: &str) -> Vec<String> {
     vec![
         "sh".to_string(),
@@ -232,7 +236,7 @@ impl ContainerRuntime for BollardRuntime {
     }
 
     async fn create_container(&self, config: &ArmorContainerConfig) -> ArmorResult<String> {
-        let bollard_config = self.build_bollard_config(config)?;
+        let bollard_config = Self::build_bollard_config(config, &self.config)?;
 
         let create_options = CreateContainerOptions {
             name: config.name.clone(),
@@ -311,6 +315,7 @@ impl ContainerRuntime for BollardRuntime {
         let mut stdout_buf: Vec<u8> = Vec::new();
         let mut stderr_buf: Vec<u8> = Vec::new();
         let mut exec_notes: Vec<String> = Vec::new();
+        let mut kill_outcome = KillOutcome::NotTimedOut;
 
         let start_exec_result = self.docker.start_exec(&exec_id, None).await;
 
@@ -336,20 +341,49 @@ impl ContainerRuntime for BollardRuntime {
                     _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {
                         warn!("Exec timed out after {}ms — killing pid from {}", timeout_ms, pid_file);
                         let kill_cmd = exec_kill_command(&pid_file);
-                        match self.docker.create_exec(id, CreateExecOptions {
+                        let kill_launched = match self.docker.create_exec(id, CreateExecOptions {
                             cmd: Some(kill_cmd),
                             attach_stdout: Some(true),
                             attach_stderr: Some(false),
                             ..Default::default()
                         }).await {
-                            Ok(kill_exec) => {
-                                if let Err(e) = self.docker.start_exec(&kill_exec.id, None).await {
-                                    warn!("kill exec failed to start after timeout: {}", e);
-                                }
+                            Ok(kill_exec) => self.docker.start_exec(&kill_exec.id, None).await.is_ok(),
+                            Err(e) => {
+                                warn!("kill exec creation failed after timeout: {}", e);
+                                false
                             }
-                            Err(e) => warn!("kill exec creation failed after timeout: {}", e),
+                        };
+                        if !kill_launched {
+                            warn!("kill exec could not be launched after timeout — the payload may still be running");
                         }
-                        exec_notes.push(format!("[agentic-armor] exec timed out after {}ms — the process was killed (SIGKILL) inside the container", timeout_ms));
+                        let mut kill_verified = false;
+                        if kill_launched {
+                            let poll_deadline = Instant::now() + Duration::from_secs(3);
+                            while Instant::now() < poll_deadline {
+                                match self.docker.inspect_exec(&exec_id).await {
+                                    Ok(inspect) if inspect.running == Some(false) => {
+                                        kill_verified = true;
+                                        break;
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        warn!("kill verification inspect failed: {}", e);
+                                        break;
+                                    }
+                                }
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            }
+                        }
+                        exec_notes.push(if kill_verified {
+                            kill_outcome = KillOutcome::Verified;
+                            format!("[agentic-armor] exec timed out after {}ms — timeout kill confirmed: the exec is no longer running", timeout_ms)
+                        } else if kill_launched {
+                            kill_outcome = KillOutcome::SentUnverified;
+                            format!("[agentic-armor] exec timed out after {}ms — SIGKILL was sent but termination could NOT be verified; the payload may still be running inside the container", timeout_ms)
+                        } else {
+                            kill_outcome = KillOutcome::NotDelivered;
+                            format!("[agentic-armor] exec timed out after {}ms — the kill command could NOT be delivered; the payload may still be running inside the container", timeout_ms)
+                        });
                     }
                 }
             }
@@ -361,8 +395,15 @@ impl ContainerRuntime for BollardRuntime {
             }
         }
 
-        let exec_inspect = self.docker.inspect_exec(&exec_id).await?;
-        let exit_code = exec_inspect.exit_code.unwrap_or(-1);
+        let exit_code = match self.docker.inspect_exec(&exec_id).await {
+            Ok(inspect) => inspect.exit_code.unwrap_or(-1),
+            Err(e) if !exec_notes.is_empty() => {
+                warn!("post-exec inspect failed after notes were recorded: {}", e);
+                exec_notes.push(format!("[agentic-armor] final status unavailable: {}", e));
+                -1
+            }
+            Err(e) => return Err(ArmorError::Docker(e.to_string())),
+        };
         if exit_code < 0 && exec_notes.is_empty() {
             exec_notes.push(
                 "[agentic-armor] exec produced no exit code (killed or still running)".into(),
@@ -375,6 +416,7 @@ impl ContainerRuntime for BollardRuntime {
             stdout: String::from_utf8_lossy(&stdout_buf).to_string(),
             stderr: String::from_utf8_lossy(&stderr_buf).to_string(),
             notes: exec_notes,
+            kill_outcome,
             duration_ms,
         })
     }
@@ -411,11 +453,10 @@ impl ContainerRuntime for BollardRuntime {
 
 impl BollardRuntime {
     pub fn build_bollard_config(
-        &self,
         config: &ArmorContainerConfig,
+        runtime_config: &Config,
     ) -> ArmorResult<bollard::container::Config<String>> {
-        if !self
-            .config
+        if !runtime_config
             .allowed_images
             .iter()
             .any(|img| img == &config.image)
@@ -446,14 +487,7 @@ impl BollardRuntime {
                                 mount.source.to_lowercase()
                             };
                         let target_lower = mount.target.to_lowercase();
-                        let all_patterns: Vec<&str> = vec![
-                            "docker.sock",
-                            "/var/run/docker",
-                            "/run/docker",
-                            "podman.sock",
-                            "/run/podman",
-                        ];
-                        for pattern in all_patterns {
+                        for pattern in &runtime_config.forbidden_mount_patterns {
                             if source_to_check.contains(pattern) || target_lower.contains(pattern) {
                                 warn!(
                                     "Security policy rejected mount '{}:{}'",
@@ -486,20 +520,44 @@ impl BollardRuntime {
             }
         }
 
-        let network_mode = docker_network_mode(&config.network, self.config.allow_host_network)?;
+        let network_mode = docker_network_mode(&config.network, runtime_config.allow_host_network)?;
 
         let memory = config
             .memory_limit
-            .unwrap_or(self.config.container_memory_mb * 1024 * 1024)
-            .max(64 * 1024 * 1024);
+            .unwrap_or(runtime_config.container_memory_mb * 1024 * 1024)
+            .max(512 * 1024 * 1024);
         let cpu_shares = config
             .cpu_shares
-            .unwrap_or(self.config.container_cpu_shares)
+            .unwrap_or(runtime_config.container_cpu_shares)
             .clamp(2, 4096);
         let pids_limit = config
             .pids_limit
-            .unwrap_or(self.config.container_pids_limit)
+            .unwrap_or(runtime_config.container_pids_limit)
             .clamp(10, 1000);
+
+        let userns_mode = match runtime_config.container_userns_mode.as_deref() {
+            None | Some("") => None,
+            Some(mode) => {
+                if mode == "host" || mode == "private" {
+                    return Err(ArmorError::InvalidUsernsMode(format!(
+                        "'{}' disables or breaks user-namespace isolation — use a daemon remap name or 'auto' (Podman)",
+                        mode
+                    )));
+                }
+                let valid = mode.len() <= 64
+                    && mode.chars().all(|c| {
+                        c.is_ascii_lowercase()
+                            || c.is_ascii_digit()
+                            || c == '-'
+                            || c == '_'
+                            || c == '.'
+                    });
+                if !valid {
+                    return Err(ArmorError::InvalidUsernsMode(mode.to_string()));
+                }
+                Some(mode.to_string())
+            }
+        };
 
         let cap_drop = vec!["ALL".to_string()];
         let readonly_rootfs = true;
@@ -516,6 +574,7 @@ impl BollardRuntime {
             readonly_rootfs: Some(readonly_rootfs),
             auto_remove: config.auto_remove,
             security_opt: Some(security_opt),
+            userns_mode,
             ..Default::default()
         };
 

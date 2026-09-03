@@ -44,3 +44,14 @@ fn test_error_display() {
     let e = ArmorError::HostNetworkDenied;
     assert!(e.to_string().contains("ALLOW_HOST_NETWORK"));
 }
+
+#[test]
+fn test_userns_error_code() {
+    assert_eq!(
+        ArmorError::InvalidUsernsMode("BAD".into()).code(),
+        "INVALID_USERNS_MODE"
+    );
+    assert!(ArmorError::InvalidUsernsMode("BAD".into())
+        .to_string()
+        .contains("user namespace"));
+}

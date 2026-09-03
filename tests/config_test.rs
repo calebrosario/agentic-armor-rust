@@ -24,12 +24,21 @@ fn test_allowed_images() {
 #[test]
 fn test_forbidden_mount_patterns() {
     let config = Config::default();
-    assert!(config
-        .forbidden_mount_patterns
-        .contains(&"docker.sock".to_string()));
-    assert!(config
-        .forbidden_mount_patterns
-        .contains(&"/var/run/docker".to_string()));
+    for pattern in [
+        "docker.sock",
+        "/var/run/docker",
+        "/run/docker",
+        "podman.sock",
+        "/run/podman",
+    ] {
+        assert!(
+            config
+                .forbidden_mount_patterns
+                .contains(&pattern.to_string()),
+            "missing forbidden mount pattern: {}",
+            pattern
+        );
+    }
 }
 
 #[test]
@@ -42,4 +51,23 @@ fn test_allowed_path_prefixes() {
     assert!(config
         .allowed_path_prefixes
         .contains(&"/workspace/".to_string()));
+}
+
+#[test]
+fn database_url_must_be_a_sqlite_url() {
+    use agentic_armor::config::validate_database_url;
+    assert!(validate_database_url("sqlite:./data/agentic_armor.db").is_ok());
+    assert!(validate_database_url("sqlite::memory:").is_ok());
+    for bad in [
+        "postgresql://host/db",
+        "postgres://host/db",
+        "mysql://host/db",
+        "",
+        "./data/x.db",
+    ] {
+        assert!(
+            validate_database_url(bad).is_err(),
+            "'{bad}' must be rejected"
+        );
+    }
 }

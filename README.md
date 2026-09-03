@@ -1,18 +1,18 @@
 # Agentic Armor (Rust)
 
-> One binary. Zero dependencies. Hardened AI agent sandboxes via MCP. Docker + Podman.
+> One binary. Zero runtime services. Hardened AI agent sandboxes via MCP. Docker + Podman.
 
 [![CI](https://github.com/calebrosario/agentic-armor-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/calebrosario/agentic-armor-rust/actions/workflows/ci.yml)
 [![Security Audit](https://img.shields.io/badge/security-cargo--audit-green)](https://github.com/calebrosario/agentic-armor-rust/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
-[![Binary Size](https://img.shields.io/badge/binary-7.3MB-success.svg)](https://github.com/calebrosario/agentic-armor-rust/releases)
+[![Binary Size](https://img.shields.io/badge/binary-9.2MB-success.svg)](https://github.com/calebrosario/agentic-armor-rust/releases)
 [![Runtime](https://img.shields.io/badge/runtime-Docker%20%7C%20Podman-blue.svg)](https://github.com/calebrosario/agentic-armor-rust#container-runtime-support)
 [![MCP Clients](https://img.shields.io/badge/MCP%20clients-7-purple.svg)](https://github.com/calebrosario/agentic-armor-rust#platform-setup)
 [![Database](https://img.shields.io/badge/database-SQLite%20embedded-success.svg)](https://github.com/calebrosario/agentic-armor-rust#why-no-postgresql)
 [![GitHub stars](https://img.shields.io/github/stars/calebrosario/agentic-armor-rust?style=social)](https://github.com/calebrosario/agentic-armor-rust/stargazers)
 
-**Agentic Armor** gives AI agents (Claude Code, OpenCode, Cursor, Codex, Windsurf) the ability to run code inside hardened, isolated containers — without touching your host filesystem. One 7.3MB Rust binary. No Node.js, no PostgreSQL, no external services.
+**Agentic Armor** gives AI agents (Claude Code, OpenCode, Cursor, Codex, Windsurf) the ability to run code inside hardened, isolated containers — without touching your host filesystem. One 9.2MB Rust binary. No Node.js, no PostgreSQL, no external services.
 
 ## Why Agentic Armor?
 
@@ -24,10 +24,10 @@
 | You babysit permission prompts all day | Agent runs autonomously in isolation — you review when done |
 | Agent needs Node.js + npm + PostgreSQL installed | One binary, SQLite embedded, zero external dependencies |
 
-## One Binary, Zero Dependencies
+## One Binary, Zero Runtime Services
 
 ```
-7.3MB binary
+9.2MB binary
 ├── Embedded SQLite database (auto-created on first run)
 ├── MCP server (stdio transport — talks to any AI agent)
 ├── Docker + Podman manager (auto-detects which is running)
@@ -58,7 +58,7 @@ Every container created by Agentic Armor is hardened — **non-overridable by de
 | Image selection | Allowlist only | ❌ Enforced at runtime layer |
 | Memory | 512MB minimum | ❌ Clamped (never 0) |
 | Process limit | 100 PIDs | ❌ Clamped (10-1000) |
-| Max concurrent containers | 10 | ❌ DoS protection |
+| Max concurrent containers | 10 | ❌ DoS protection (serialized within one armor process; multiple armor processes sharing one `DATABASE_URL` each get their own count) |
 | Path access (upload/download) | `/tmp/`, `/home/opencode/`, `/workspace/` only | ❌ Prefix + char allowlist |
 | Mount validation | Canonicalized paths + forbidden patterns | ❌ Symlink-aware |
 
@@ -150,6 +150,8 @@ Podman rootless (if socket compromised):
 | `CONTAINER_CPU_SHARES` | `1024` | Default CPU shares |
 | `CONTAINER_PIDS_LIMIT` | `100` | Default PID limit |
 | `ALLOW_HOST_NETWORK` | `false` | Allow `networkMode: host` |
+| `DATABASE_URL` | `sqlite:./data/agentic_armor.db` | SQLite database location (sqlite: URLs only; WAL enabled) |
+| `CONTAINER_USERNS_MODE` | _(unset)_ | Per-container user namespace — `auto` on Podman rootless, or a daemon remap name with Docker userns-remap. Unset by default: plain dockerd rejects per-container userns |
 
 ## Security Defaults
 
@@ -166,19 +168,19 @@ Every container gets:
 
 ```bash
 cargo build
-cargo test          # 45 tests
+cargo test          # 62 tests
 cargo run           # Run test container lifecycle
 ```
 
 ### Adversarial Testing
 
-12 automated scenarios where a real agent (OpenCode + LLM) is instructed to escape the sandbox, exfiltrate secrets, or abuse the system — with every attempt verified contained and logged: [docs/ADVERSARIAL-TESTING.md](docs/ADVERSARIAL-TESTING.md)
+13 automated scenarios where a real agent (OpenCode + LLM) is instructed to escape the sandbox, exfiltrate secrets, or abuse the system — with every attempt verified contained and logged: [docs/ADVERSARIAL-TESTING.md](docs/ADVERSARIAL-TESTING.md)
 
 ```bash
 python3 tests/adversarial/runner.py --all   # full suite (~1h), results in tests/adversarial/reports/
 ```
 
-Every `task_exec` attempt is persisted to the audit trail (`exec_logged` events, surfaced by `task_logs`). Commands that exceed their `timeout` are terminated with a process-group SIGKILL (the command and everything it spawned); the result notes record the kill. Set `blockNpmScripts: true` on `task_create` to set `NPM_CONFIG_IGNORE_SCRIPTS=1` in the container so npm lifecycle scripts (pre/postinstall) cannot run.
+Every `task_exec` attempt is persisted to the audit trail (`exec_logged` events, surfaced by `task_logs`). Commands that exceed their `timeout` are terminated with a process-group SIGKILL covering the command and its process group (a payload that calls `setsid` can escape the group — the exec wrapper's death is observed either way, so verification confirms the wrapper, not every descendant). The kill is verified by re-inspecting the exec: result notes and the `exec_logged` audit entry record `timedOut=true kill=verified|unverified|undeliverable`, and an undeliverable kill is reported as such rather than as success. Set `blockNpmScripts: true` on `task_create` to set `NPM_CONFIG_IGNORE_SCRIPTS=1` in the container so npm lifecycle scripts (pre/postinstall) cannot run.
 
 ---
 
@@ -199,7 +201,7 @@ cd agentic-armor-rust
 cargo build --release
 ```
 
-The binary is at `target/release/agentic-armor` (7.3MB, no runtime dependencies).
+The binary is at `target/release/agentic-armor` (9.2MB, no runtime dependencies).
 
 **Step 2: Verify it works**
 

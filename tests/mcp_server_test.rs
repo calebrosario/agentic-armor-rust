@@ -609,3 +609,95 @@ fn exec_kill_command_kills_process_group_and_cleans_up() {
         kill[2]
     );
 }
+
+#[test]
+fn test_task_summary_json_status_is_not_debug_quoted() {
+    use agentic_armor::mcp::server::task_summary_json;
+    use agentic_armor::Task;
+
+    let t = Task {
+        id: "t-1".into(),
+        name: "demo".into(),
+        status: "running".into(),
+        owner: Some("agent".into()),
+        metadata: serde_json::json!({}),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+
+    let summary = task_summary_json(&t);
+    assert_eq!(summary["status"].as_str(), Some("running"));
+    assert_eq!(summary["id"].as_str(), Some("t-1"));
+    assert_eq!(summary["owner"].as_str(), Some("agent"));
+    assert_eq!(summary["name"].as_str(), Some("demo"));
+}
+
+#[test]
+fn exec_audit_message_distinguishes_all_kill_outcomes() {
+    use agentic_armor::mcp::server::exec_audit_message;
+    use agentic_armor::KillOutcome;
+
+    assert!(
+        exec_audit_message(137, 5100, KillOutcome::Verified, "sleep 60").contains("kill=verified")
+    );
+    assert!(
+        exec_audit_message(137, 5100, KillOutcome::SentUnverified, "sleep 60")
+            .contains("kill=unverified")
+    );
+    assert!(
+        exec_audit_message(137, 5100, KillOutcome::NotDelivered, "sleep 60")
+            .contains("kill=undeliverable")
+    );
+    assert_eq!(
+        exec_audit_message(0, 42, KillOutcome::NotTimedOut, "echo hi"),
+        "exec exit=0 durMs=42: echo hi"
+    );
+}
+
+#[test]
+fn stream_errors_containing_timed_out_never_attest_a_kill() {
+    use agentic_armor::mcp::server::exec_audit_message;
+    use agentic_armor::KillOutcome;
+
+    let msg = exec_audit_message(-1, 120_000, KillOutcome::NotTimedOut, "sleep 300");
+    assert!(
+        !msg.contains("kill="),
+        "no timeout fired and no kill was attempted — transport-error text must not attest one: {msg}"
+    );
+    assert!(msg.starts_with("exec exit=-1 durMs=120000:"));
+}
+#[test]
+fn stop_delete_error_classification_separates_benign_from_real_failures() {
+    use agentic_armor::mcp::server::{is_already_stopped_error, is_no_such_container_error};
+
+    for benign in [
+        "Container already stopped",
+        "container abc is not running",
+        "Docker responded with status code 304: ",
+    ] {
+        assert!(
+            is_already_stopped_error(benign),
+            "'{benign}' is a skip, not a failure"
+        );
+    }
+    for real in [
+        "permission denied",
+        "connection refused",
+        "no such container: 304ab9c",
+    ] {
+        assert!(
+            !is_already_stopped_error(real),
+            "'{real}' must surface stop_failed, not stop_skipped — note the hex id contains '304'"
+        );
+    }
+    for gone in ["No such container: abc", "container not found: abc"] {
+        assert!(
+            is_no_such_container_error(gone),
+            "'{gone}' is destroy_skipped"
+        );
+    }
+    assert!(
+        !is_no_such_container_error("device or resource busy"),
+        "real destroy failures must retain the row"
+    );
+}

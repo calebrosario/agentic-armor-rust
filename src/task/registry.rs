@@ -167,11 +167,14 @@ impl TaskRegistry {
     }
 
     pub async fn set_container_id(&self, id: &str, container_id: &str) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE tasks SET metadata = json_set(metadata, '$.containerId', $2), updated_at = datetime('now') WHERE id = $1")
+        let result = sqlx::query("UPDATE tasks SET metadata = json_set(metadata, '$.containerId', $2), updated_at = datetime('now') WHERE id = $1")
             .bind(id)
             .bind(container_id)
             .execute(&self.pool)
             .await?;
+        if result.rows_affected() == 0 {
+            return Err(sqlx::Error::RowNotFound);
+        }
         Ok(())
     }
 
@@ -190,6 +193,14 @@ impl TaskRegistry {
                         .map(String::from)
                 })
         }))
+    }
+
+    pub async fn count_active(&self) -> Result<i64, sqlx::Error> {
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE status IN ('pending', 'running')")
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(count)
     }
 
     pub async fn list(&self, limit: i64) -> Result<Vec<Task>, sqlx::Error> {

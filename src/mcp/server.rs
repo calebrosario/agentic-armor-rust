@@ -1,14 +1,16 @@
 use crate::config::Config;
 use crate::docker::{
     is_pid_exhaustion_error, task_network_name, ArmorContainerConfig, ContainerRuntime,
-    ExecRequest, Mount, NetworkConfig,
+    ExecRequest, KillOutcome, Mount, NetworkConfig,
 };
 use crate::error::{ArmorError, ArmorResult};
-use crate::task::{TaskLifecycle, TaskRegistry};
+use crate::task::{Task, TaskLifecycle, TaskRegistry};
 use mcp_sdk::{CallToolResult, McpServer, StdioTransport, ToolBuilder};
 use serde_json::json;
 use std::sync::Arc;
 use tracing::{error, info, warn};
+
+const MAX_CONCURRENT_CONTAINERS: usize = 10;
 
 pub async fn start(
     config: Arc<Config>,
@@ -20,11 +22,11 @@ pub async fn start(
 
     register_task_create(&server, &config, &runtime, &registry, &lifecycle).await;
     register_task_exec(&server, &runtime, &lifecycle, &registry).await;
-    register_task_upload(&server, &runtime, &lifecycle, &config).await;
-    register_task_download(&server, &runtime, &lifecycle, &config).await;
+    register_task_upload(&server, &runtime, &lifecycle, &config, &registry).await;
+    register_task_download(&server, &runtime, &lifecycle, &config, &registry).await;
     register_task_list(&server, &registry).await;
-    register_task_stop(&server, &runtime, &lifecycle).await;
-    register_task_delete(&server, &runtime, &lifecycle).await;
+    register_task_stop(&server, &runtime, &lifecycle, &registry).await;
+    register_task_delete(&server, &runtime, &lifecycle, &registry).await;
     register_task_logs(&server, &registry).await;
 
     info!("Agentic Armor MCP server starting (8 tools, stdio)");
@@ -45,6 +47,7 @@ async fn register_task_create(
     let reg = registry.clone();
     let lc = lifecycle.clone();
     let cfg = config.clone();
+    let create_gate = Arc::new(tokio::sync::Mutex::new(()));
 
     server.register_tool(
         ToolBuilder::new("task_create")
@@ -73,6 +76,7 @@ async fn register_task_create(
                 let reg = reg.clone();
                 let lc = lc.clone();
                 let cfg = cfg.clone();
+                let create_gate = create_gate.clone();
                 async move {
                     let task_id = match arg_str(&args, "taskId") {
                         Ok(v) => v,
@@ -121,13 +125,19 @@ async fn register_task_create(
                         return Ok(CallToolResult::error("Image not allowed. Use a pre-approved sandbox image."));
                     }
 
-                    let existing = reg.list(1000).await.unwrap_or_default();
-                    let active = existing.iter().filter(|t| {
-                        matches!(t.status.as_str(), "pending" | "running")
-                    }).count();
-                    if active >= 10 {
+                    let _create_gate = create_gate.lock().await;
+                    let active = match reg.count_active().await {
+                        Ok(n) => n as usize,
+                        Err(e) => {
+                            return Ok(CallToolResult::error(format!(
+                                "Concurrency check failed (database error) — refusing to create: {}",
+                                e
+                            )))
+                        }
+                    };
+                    if active >= MAX_CONCURRENT_CONTAINERS {
                         return Ok(CallToolResult::error(
-                            format!("Maximum concurrent containers (10) reached. Delete existing tasks first. Active: {}", active)
+                            format!("Maximum concurrent containers ({}) reached. Delete existing tasks first. Active: {}", MAX_CONCURRENT_CONTAINERS, active)
                         ));
                     }
 
@@ -135,6 +145,7 @@ async fn register_task_create(
                         Ok(t) => t,
                         Err(e) => return Ok(CallToolResult::error(format!("Task creation failed: {}", e))),
                     };
+                    drop(_create_gate);
 
                     let per_task_network = if network_mode == "bridge" {
                         Some(task_network_name(task_id))
@@ -145,8 +156,8 @@ async fn register_task_create(
                     if let Some(net) = &per_task_network {
                         if let Err(e) = rt.create_network(net).await {
                             error!("Network creation failed for task {}: {}", task_id, e);
-                            rollback_task_create(&rt, &lc, task_id, None, None).await;
-                            return Ok(CallToolResult::error(format!("Network creation failed: {}", e)));
+                            let cleaned = rollback_task_create(&rt, &reg, &lc, task_id, None, None).await;
+                            return Ok(CallToolResult::error(format!("Network creation failed: {}{}", e, cleanup_warning(cleaned))));
                         }
                     }
 
@@ -185,21 +196,21 @@ async fn register_task_create(
                         }
                         Err(e) => {
                             error!("Container creation failed for task {}: {}", task_id, e);
-                            rollback_task_create(&rt, &lc, task_id, None, per_task_network.as_deref()).await;
-                            return Ok(CallToolResult::error(format!("Container creation failed: {}", e)));
+                            let cleaned = rollback_task_create(&rt, &reg, &lc, task_id, None, per_task_network.as_deref()).await;
+                            return Ok(CallToolResult::error(format!("Container creation failed: {}{}", e, cleanup_warning(cleaned))));
                         }
                     };
 
                     if let Err(e) = rt.start_container(&container_id).await {
                         error!("Container start failed for {}: {}", container_id, e);
-                        rollback_task_create(&rt, &lc, task_id, Some(&container_id), per_task_network.as_deref()).await;
-                        return Ok(CallToolResult::error(format!("Container start failed: {}", e)));
+                        let cleaned = rollback_task_create(&rt, &reg, &lc, task_id, Some(&container_id), per_task_network.as_deref()).await;
+                        return Ok(CallToolResult::error(format!("Container start failed: {}{}", e, cleanup_warning(cleaned))));
                     }
 
                     if let Err(e) = reg.set_container_id(task_id, &container_id).await {
                         error!("Failed to persist containerId: {}", e);
-                        rollback_task_create(&rt, &lc, task_id, Some(&container_id), per_task_network.as_deref()).await;
-                        return Ok(CallToolResult::error(format!("Failed to associate container: {}", e)));
+                        let cleaned = rollback_task_create(&rt, &reg, &lc, task_id, Some(&container_id), per_task_network.as_deref()).await;
+                        return Ok(CallToolResult::error(format!("Failed to associate container: {}{}", e, cleanup_warning(cleaned))));
                     }
 
                     audit_event(&reg, task_id, "container_created", &format!("Container {} started", container_id)).await;
@@ -283,7 +294,8 @@ async fn register_task_exec(
                         }
                     };
 
-                    audit_event(&reg, task_id, "exec_logged", &format!("exec exit={} durMs={}: {}", result.exit_code, result.duration_ms, audit_cmd)).await;
+                    let audit_msg = exec_audit_message(result.exit_code, result.duration_ms, result.kill_outcome, &audit_cmd);
+                    audit_event(&reg, task_id, "exec_logged", &audit_msg).await;
 
                     let fork_hint = if result.stderr.contains("can't fork")
                         || result.stderr.contains("Cannot fork")
@@ -313,10 +325,12 @@ async fn register_task_upload(
     runtime: &Arc<dyn ContainerRuntime>,
     lifecycle: &Arc<TaskLifecycle>,
     config: &Arc<Config>,
+    registry: &Arc<TaskRegistry>,
 ) {
     let rt = runtime.clone();
     let lc = lifecycle.clone();
     let cfg = config.clone();
+    let reg = registry.clone();
 
     server.register_tool(
         ToolBuilder::new("task_upload")
@@ -334,6 +348,7 @@ async fn register_task_upload(
                 let rt = rt.clone();
                 let lc = lc.clone();
                 let cfg = cfg.clone();
+                let reg = reg.clone();
                 async move {
                     let (task_id, path, content) = match (arg_str(&args, "taskId"), arg_str(&args, "path"), arg_str(&args, "content")) {
                         (Ok(a), Ok(b), Ok(c)) => (a, b, c),
@@ -369,17 +384,25 @@ async fn register_task_upload(
                             ..Default::default()
                         }).await {
                             Ok(r) => r,
-                            Err(e) => return Ok(CallToolResult::error(format!("Upload failed: {}", e))),
+                            Err(e) => {
+                                audit_event(&reg, task_id, "upload_failed", &format!("upload {} exec error: {}", path, e)).await;
+                                return Ok(CallToolResult::error(format!("Upload failed: {}", e)));
+                            }
                         };
                         if result.exit_code != 0 {
-                            return Ok(CallToolResult::error(result.stderr));
+                            let rendered = render_exec_stderr(&result.stderr, &result.notes, "");
+                            audit_event(&reg, task_id, "upload_failed", &format!("upload {} failed (exit={}): {}", path, result.exit_code, rendered)).await;
+                            return Ok(CallToolResult::error(format!("Upload failed: {}", rendered)));
                         }
                     }
+
+                    let audited = audit_event(&reg, task_id, "file_uploaded", &format!("upload {} bytes -> {}", content.len(), path)).await;
 
                     Ok(CallToolResult::text(json!({
                         "success": true,
                         "path": path,
-                        "bytes": content.len()
+                        "bytes": content.len(),
+                        "audited": audited
                     }).to_string()))
                 }
             }),
@@ -391,10 +414,12 @@ async fn register_task_download(
     runtime: &Arc<dyn ContainerRuntime>,
     lifecycle: &Arc<TaskLifecycle>,
     config: &Arc<Config>,
+    registry: &Arc<TaskRegistry>,
 ) {
     let rt = runtime.clone();
     let lc = lifecycle.clone();
     let cfg = config.clone();
+    let reg = registry.clone();
 
     server.register_tool(
         ToolBuilder::new("task_download")
@@ -411,6 +436,7 @@ async fn register_task_download(
                 let rt = rt.clone();
                 let lc = lc.clone();
                 let cfg = cfg.clone();
+                let reg = reg.clone();
                 async move {
                     let (task_id, path) = match (arg_str(&args, "taskId"), arg_str(&args, "path")) {
                         (Ok(a), Ok(b)) => (a, b),
@@ -441,22 +467,30 @@ async fn register_task_download(
                         ..Default::default()
                     }).await {
                         Ok(r) => r,
-                        Err(e) => return Ok(CallToolResult::error(format!("Download failed: {}", e))),
+                        Err(e) => {
+                            audit_event(&reg, task_id, "download_failed", &format!("download {} exec error: {}", path, e)).await;
+                            return Ok(CallToolResult::error(format!("Download failed: {}", e)));
+                        }
                     };
 
                     if result.exit_code != 0 {
-                        return Ok(CallToolResult::error(result.stderr));
+                        let rendered = render_exec_stderr(&result.stderr, &result.notes, "");
+                        audit_event(&reg, task_id, "download_failed", &format!("download {} failed (exit={}): {}", path, result.exit_code, rendered)).await;
+                        return Ok(CallToolResult::error(format!("Download failed: {}", rendered)));
                     }
 
                     let bytes = result.stdout.len();
                     let truncated = bytes >= max_bytes;
+
+                    let audited = audit_event(&reg, task_id, "file_downloaded", &format!("download {} -> {} bytes (truncated={})", path, bytes, truncated)).await;
 
                     Ok(CallToolResult::text(json!({
                         "success": true,
                         "path": path,
                         "content": result.stdout,
                         "bytes": bytes,
-                        "truncated": truncated
+                        "truncated": truncated,
+                        "audited": audited
                     }).to_string()))
                 }
             }),
@@ -500,13 +534,7 @@ async fn register_task_list(server: &Arc<McpServer>, registry: &Arc<TaskRegistry
 
                         Ok(CallToolResult::text(
                             json!({
-                                "tasks": tasks.iter().map(|t| json!({
-                                    "id": t.id,
-                                    "name": t.name,
-                                    "status": format!("{:?}", t.status).to_lowercase(),
-                                    "owner": t.owner,
-                                    "createdAt": t.created_at
-                                })).collect::<Vec<_>>(),
+                                "tasks": tasks.iter().map(task_summary_json).collect::<Vec<_>>(),
                                 "count": tasks.len()
                             })
                             .to_string(),
@@ -521,9 +549,11 @@ async fn register_task_stop(
     server: &Arc<McpServer>,
     runtime: &Arc<dyn ContainerRuntime>,
     lifecycle: &Arc<TaskLifecycle>,
+    registry: &Arc<TaskRegistry>,
 ) {
     let rt = runtime.clone();
     let lc = lifecycle.clone();
+    let reg = registry.clone();
 
     server
         .register_tool(
@@ -537,15 +567,31 @@ async fn register_task_stop(
                 .handler(move |args| {
                     let rt = rt.clone();
                     let lc = lc.clone();
+                    let reg = reg.clone();
                     async move {
                         let task_id = match arg_str(&args, "taskId") {
                             Ok(v) => v,
                             Err(e) => return Ok(CallToolResult::error(e)),
                         };
 
-                        if let Ok(container_id) = lc.get_container_id(task_id).await {
-                            if let Err(e) = rt.stop_container(&container_id, 10).await {
-                                warn!("Failed to stop container {}: {}", container_id, e);
+                        match lc.get_container_id(task_id).await {
+                            Ok(container_id) => {
+                                if let Err(e) = rt.stop_container(&container_id, 10).await {
+                                    if is_already_stopped_error(&e.to_string()) {
+                                        audit_event(&reg, task_id, "stop_skipped", &format!("container {} already stopped", container_id)).await;
+                                    } else {
+                                        warn!("Failed to stop container {}: {}", container_id, e);
+                                        audit_event(&reg, task_id, "stop_failed", &format!("container {} stop failed ({}): task NOT cancelled — retry task_stop or task_delete", container_id, e)).await;
+                                        return Ok(CallToolResult::error(format!(
+                                            "Failed to stop container {} ({}). The task was NOT cancelled and the container may still be running — retry task_stop or task_delete.",
+                                            container_id, e
+                                        )));
+                                    }
+                                }
+                            }
+                            Err(ArmorError::ContainerNotAssociated(_)) => {}
+                            Err(e) => {
+                                return Ok(CallToolResult::error(format!("Cannot determine container for task: {}", e)));
                             }
                         }
 
@@ -574,9 +620,11 @@ async fn register_task_delete(
     server: &Arc<McpServer>,
     runtime: &Arc<dyn ContainerRuntime>,
     lifecycle: &Arc<TaskLifecycle>,
+    registry: &Arc<TaskRegistry>,
 ) {
     let rt = runtime.clone();
     let lc = lifecycle.clone();
+    let reg = registry.clone();
 
     server.register_tool(
         ToolBuilder::new("task_delete")
@@ -589,6 +637,7 @@ async fn register_task_delete(
             .handler(move |args| {
                 let rt = rt.clone();
                 let lc = lc.clone();
+                let reg = reg.clone();
                 async move {
                     let task_id = match arg_str(&args, "taskId") {
                         Ok(v) => v,
@@ -596,24 +645,33 @@ async fn register_task_delete(
                     };
 
                     let container_id = lc.get_container_id(task_id).await.ok();
-                    let had_task = lc.get_task(task_id).await.is_ok();
+                    let had_task = match lc.get_task(task_id).await {
+                        Ok(_) => true,
+                        Err(ArmorError::TaskNotFound(_)) => false,
+                        Err(_) => true,
+                    };
 
-                    if let Some(container_id) = container_id.as_deref() {
-                        if let Err(e) = rt.destroy_container(container_id).await {
-                            warn!("Failed to destroy container {} for task {}: {} — container may still be running on the host", container_id, task_id, e);
-                        }
-                    } else {
-                        let orphan_name = format!("armor-{}", task_id);
-                        if let Err(e) = rt.destroy_container(&orphan_name).await {
-                            if !e.to_string().to_lowercase().contains("no such container") {
-                                warn!("Failed to clean up potential orphan container {}: {}", orphan_name, e);
-                            }
+                    let destroy_target = match container_id.as_deref() {
+                        Some(cid) => cid.to_string(),
+                        None => format!("armor-{}", task_id),
+                    };
+                    if let Err(e) = rt.destroy_container(&destroy_target).await {
+                        if is_no_such_container_error(&e.to_string()) {
+                            audit_event(&reg, task_id, "destroy_skipped", &format!("container {} already gone", destroy_target)).await;
+                        } else {
+                            warn!("Failed to destroy container {} for task {}: {} — container may still be running on the host", destroy_target, task_id, e);
+                            audit_event(&reg, task_id, "destroy_failed", &format!("container {} destroy failed ({}): task row retained — retry task_delete", destroy_target, e)).await;
+                            return Ok(CallToolResult::error(format!(
+                                "Failed to destroy container {} ({}). The task row was retained so the container cannot be orphaned — retry task_delete once the runtime is healthy.",
+                                destroy_target, e
+                            )));
                         }
                     }
                     if let Err(e) = rt.remove_network(&task_network_name(task_id)).await {
                         let msg = e.to_string().to_lowercase();
                         if !msg.contains("no such network") && !msg.contains("network not found") {
                             warn!("Failed to remove network for task {}: {}", task_id, e);
+                            audit_event(&reg, task_id, "network_remove_failed", &format!("network {} removal failed: {}", task_network_name(task_id), e)).await;
                         }
                     }
 
@@ -689,17 +747,21 @@ async fn register_task_logs(server: &Arc<McpServer>, registry: &Arc<TaskRegistry
 
 async fn rollback_task_create(
     rt: &Arc<dyn ContainerRuntime>,
+    reg: &TaskRegistry,
     lc: &TaskLifecycle,
     task_id: &str,
     container_id: Option<&str>,
     network_name: Option<&str>,
-) {
+) -> bool {
+    let mut fully_cleaned = true;
     if let Some(cid) = container_id {
         if let Err(e) = rt.destroy_container(cid).await {
             warn!(
                 "Rollback: container destroy failed for {}: {} — container may remain on host",
                 cid, e
             );
+            audit_event(reg, task_id, "destroy_failed", &format!("rollback: container {} destroy failed ({}): container may remain on host — run task_delete {} to clean it up", cid, e, task_id)).await;
+            fully_cleaned = false;
         }
     }
     if let Some(net) = network_name {
@@ -708,10 +770,28 @@ async fn rollback_task_create(
                 "Rollback: network removal failed for {}: {} — orphaned network, remove manually",
                 net, e
             );
+            audit_event(
+                reg,
+                task_id,
+                "network_remove_failed",
+                &format!("rollback: network {} removal failed: {}", net, e),
+            )
+            .await;
+            fully_cleaned = false;
         }
     }
     if let Err(e) = lc.delete_task(task_id).await {
         error!("Rollback failed: task {} row not removed ({}) — it now counts toward the concurrency cap; delete it manually", task_id, e);
+        fully_cleaned = false;
+    }
+    fully_cleaned
+}
+
+fn cleanup_warning(fully_cleaned: bool) -> &'static str {
+    if fully_cleaned {
+        ""
+    } else {
+        " (rollback incomplete: a container or network may remain on the host — run task_delete to clean it up)"
     }
 }
 
@@ -759,6 +839,26 @@ pub fn default_task_mounts_for(runtime: &str) -> Vec<Mount> {
             tmpfs_options: Some(opts_for("256m")),
         },
     ]
+}
+
+pub fn task_summary_json(t: &Task) -> serde_json::Value {
+    json!({
+        "id": t.id,
+        "name": t.name,
+        "status": t.status.to_lowercase(),
+        "owner": t.owner,
+        "createdAt": t.created_at
+    })
+}
+
+pub fn is_already_stopped_error(err: &str) -> bool {
+    let m = err.to_lowercase();
+    m.contains("already stopped") || m.contains("not running") || m.contains("status code 304")
+}
+
+pub fn is_no_such_container_error(err: &str) -> bool {
+    let m = err.to_lowercase();
+    m.contains("no such container") || m.contains("container not found")
 }
 
 pub fn is_valid_network_mode(mode: &str) -> bool {
@@ -866,12 +966,16 @@ pub fn npm_scripts_blocked_env(blocked: bool) -> Option<Vec<String>> {
     }
 }
 
-async fn audit_event(reg: &TaskRegistry, task_id: &str, event_type: &str, message: &str) {
-    if let Err(e) = reg.add_event(task_id, event_type, message).await {
-        warn!(
-            "AUDIT WRITE FAILED for task {} ({}): {} — audit trail is incomplete",
-            task_id, event_type, e
-        );
+async fn audit_event(reg: &TaskRegistry, task_id: &str, event_type: &str, message: &str) -> bool {
+    match reg.add_event(task_id, event_type, message).await {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(
+                "AUDIT WRITE FAILED for task {} ({}): {} — audit trail is incomplete",
+                task_id, event_type, e
+            );
+            false
+        }
     }
 }
 
@@ -915,6 +1019,23 @@ pub fn render_exec_stderr(stderr: &str, notes: &[String], fork_hint: &str) -> St
         parts.push(fork_hint.trim().to_string());
     }
     parts.join("\n")
+}
+
+pub fn exec_audit_message(
+    exit_code: i64,
+    duration_ms: u64,
+    kill_outcome: KillOutcome,
+    audit_cmd: &str,
+) -> String {
+    let mut msg = format!("exec exit={} durMs={}", exit_code, duration_ms);
+    if kill_outcome != KillOutcome::NotTimedOut {
+        msg.push_str(&format!(
+            " timedOut=true kill={}",
+            kill_outcome.audit_label()
+        ));
+    }
+    msg.push_str(&format!(": {}", audit_cmd));
+    msg
 }
 
 pub fn audit_command(command: &[String]) -> String {
