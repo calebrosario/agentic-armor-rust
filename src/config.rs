@@ -54,6 +54,7 @@ pub struct Config {
     pub allowed_path_prefixes: Vec<String>,
     pub forbidden_mount_patterns: Vec<String>,
     pub tombstone_path: std::path::PathBuf,
+    pub handler_timeout_secs: u64,
 }
 
 impl Default for Config {
@@ -104,6 +105,11 @@ impl Default for Config {
                 "/run/podman".into(),
             ],
             tombstone_path: tombstone_path_for(&database_url),
+            handler_timeout_secs: env::var("AA_HANDLER_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|s| *s >= 1)
+                .unwrap_or(900),
         }
     }
 }

@@ -120,10 +120,12 @@ pub async fn start(
     lifecycle: Arc<TaskLifecycle>,
 ) -> ArmorResult<()> {
     let _ = TOMBSTONE_PATH.set(config.tombstone_path.clone());
-    let server = Arc::new(McpServer::new("agentic-armor", "0.4.0"));
+    let server = Arc::new(
+        McpServer::new("agentic-armor", "0.4.0").handler_timeout(config.handler_timeout_secs),
+    );
 
     register_task_create(&server, &config, &runtime, &registry, &lifecycle).await;
-    register_task_exec(&server, &runtime, &lifecycle, &registry).await;
+    register_task_exec(&server, &runtime, &lifecycle, &registry, &config).await;
     register_task_upload(&server, &runtime, &lifecycle, &config, &registry).await;
     register_task_download(&server, &runtime, &lifecycle, &config, &registry).await;
     register_task_list(&server, &registry).await;
@@ -334,10 +336,12 @@ async fn register_task_exec(
     runtime: &Arc<dyn ContainerRuntime>,
     lifecycle: &Arc<TaskLifecycle>,
     registry: &Arc<TaskRegistry>,
+    config: &Arc<Config>,
 ) {
     let rt = runtime.clone();
     let lc = lifecycle.clone();
     let reg = registry.clone();
+    let handler_secs = config.handler_timeout_secs;
 
     server.register_tool(
         ToolBuilder::new("task_exec")
@@ -347,7 +351,10 @@ async fn register_task_exec(
                 "properties": {
                     "taskId": { "type": "string" },
                     "command": { "type": "array", "items": { "type": "string" } },
-                    "timeout": { "type": "number" }
+                    "timeout": {
+                        "type": "number",
+                        "description": "milliseconds before the warden kills the exec; must stay under the handler ceiling (AA_HANDLER_TIMEOUT_SECS, default 900s)"
+                    }
                 },
                 "required": ["taskId", "command"]
             }))
@@ -368,6 +375,14 @@ async fn register_task_exec(
                         Ok(v) => v,
                         Err(e) => return Ok(CallToolResult::error(e)),
                     };
+                    let ceiling_ms = handler_secs.saturating_sub(1).saturating_mul(1000);
+                    if timeout_ms.is_some_and(|ms| ms > ceiling_ms) {
+                        return Ok(CallToolResult::error(format!(
+                            "timeout {}ms exceeds the tool handler ceiling of {}s: the handler would be cancelled before the timeout kill could run and report honestly. Use a shorter timeout or raise AA_HANDLER_TIMEOUT_SECS.",
+                            timeout_ms.unwrap_or_default(),
+                            handler_secs
+                        )));
+                    }
 
                     let audit_cmd = audit_command(&command);
 

@@ -249,3 +249,12 @@ fn host_escalated_kills_get_their_own_audit_label() {
     );
     assert!(message.contains("exec exit=137"), "{}", message);
 }
+
+#[test]
+fn handler_ceiling_defaults_high_enough_for_real_builds() {
+    assert_eq!(
+        agentic_armor::config::Config::default().handler_timeout_secs,
+        900,
+        "default ceiling must accommodate multi-minute builds and test suites"
+    );
+}
