@@ -70,6 +70,7 @@ pub enum KillOutcome {
     Verified,
     SentUnverified,
     NotDelivered,
+    HostEscalated,
 }
 
 impl KillOutcome {
@@ -79,6 +80,7 @@ impl KillOutcome {
             KillOutcome::Verified => "verified",
             KillOutcome::SentUnverified => "unverified",
             KillOutcome::NotDelivered => "undeliverable",
+            KillOutcome::HostEscalated => "host-escalated",
         }
     }
 }
