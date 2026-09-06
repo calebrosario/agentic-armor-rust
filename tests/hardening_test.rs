@@ -198,3 +198,63 @@ fn forbidden_mount_patterns_are_read_from_config_not_hardcoded() {
     };
     assert!(BollardRuntime::build_bollard_config(&via_target, &Config::default()).is_err());
 }
+
+#[test]
+fn internal_egress_flag_reaches_network_creation() {
+    use agentic_armor::config::TaskNetworkEgress;
+    let internal = agentic_armor::docker::BollardRuntime::network_create_options(
+        "armor-t1",
+        TaskNetworkEgress::Internal,
+    );
+    assert!(
+        internal.internal,
+        "internal egress must set the docker flag"
+    );
+    let masquerade = agentic_armor::docker::BollardRuntime::network_create_options(
+        "armor-t1",
+        TaskNetworkEgress::Masquerade,
+    );
+    assert!(!masquerade.internal);
+}
+
+#[test]
+fn cgroup_membership_check_accepts_both_layouts_and_rejects_other_containers() {
+    let id = "a".repeat(64);
+    let cgroupfs = format!("0::/docker/{}/payload", id);
+    let systemd = format!("11:devices:/system.slice/docker-{}.scope", id);
+    let other = "b".repeat(64);
+    assert!(agentic_armor::docker::cgroup_contains_container(
+        &cgroupfs, &id
+    ));
+    assert!(agentic_armor::docker::cgroup_contains_container(
+        &systemd, &id
+    ));
+    assert!(!agentic_armor::docker::cgroup_contains_container(
+        &cgroupfs, &other
+    ));
+}
+
+#[test]
+fn host_escalated_kills_get_their_own_audit_label() {
+    let message = agentic_armor::mcp::server::exec_audit_message(
+        137,
+        5000,
+        agentic_armor::docker::KillOutcome::HostEscalated,
+        "sleep 999",
+    );
+    assert!(
+        message.contains("timedOut=true kill=host-escalated"),
+        "{}",
+        message
+    );
+    assert!(message.contains("exec exit=137"), "{}", message);
+}
+
+#[test]
+fn handler_ceiling_defaults_high_enough_for_real_builds() {
+    assert_eq!(
+        agentic_armor::config::Config::default().handler_timeout_secs,
+        900,
+        "default ceiling must accommodate multi-minute builds and test suites"
+    );
+}

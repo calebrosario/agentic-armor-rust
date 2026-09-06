@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
+use tracing::info;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -47,6 +48,9 @@ pub struct Task {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskEvent {
+    /// Monotonic insertion order (AUTOINCREMENT: never reused, stable under
+    /// same-second bursts where created_at cannot discriminate).
+    pub seq: i64,
     pub id: String,
     pub task_id: String,
     pub event_type: String,
@@ -83,7 +87,8 @@ impl TaskRegistry {
 
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS task_events (
-                id TEXT PRIMARY KEY,
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT NOT NULL UNIQUE,
                 task_id TEXT NOT NULL,
                 event_type TEXT NOT NULL,
                 level TEXT NOT NULL DEFAULT 'info',
@@ -102,11 +107,34 @@ impl TaskRegistry {
         .await?
         .map(|s| s.contains("CASCADE"))
         .unwrap_or(false);
-        if legacy {
+        let has_seq: bool = sqlx::query("PRAGMA table_info(task_events)")
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .any(|row| {
+                row.try_get::<String, _>("name")
+                    .map(|n| n == "seq")
+                    .unwrap_or(false)
+            });
+        // Both pre-v2 shapes lack the monotonic seq column: legacy v0 (CASCADE
+        // foreign key) and v1 (append-only, id-only ordering). created_at has
+        // second resolution, so it cannot order same-second evidence; rebuild
+        // assigns seq in created_at order, which is the best available truth.
+        if legacy || !has_seq {
+            let reason = if legacy {
+                "cascade-foreign-key"
+            } else {
+                "missing-seq-column"
+            };
+            info!(
+                "Rebuilding task_events table ({}) to add monotonic seq",
+                reason
+            );
             sqlx::query(
                 r#"BEGIN;
                 CREATE TABLE task_events_new (
-                    id TEXT PRIMARY KEY,
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT NOT NULL UNIQUE,
                     task_id TEXT NOT NULL,
                     event_type TEXT NOT NULL,
                     level TEXT NOT NULL DEFAULT 'info',
@@ -114,13 +142,25 @@ impl TaskRegistry {
                     data TEXT,
                     created_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
-                INSERT INTO task_events_new SELECT id, task_id, event_type, level, message, data, created_at FROM task_events;
+                INSERT INTO task_events_new (id, task_id, event_type, level, message, data, created_at)
+                    SELECT id, task_id, event_type, level, message, data, created_at FROM task_events ORDER BY created_at;
                 DROP TABLE task_events;
                 ALTER TABLE task_events_new RENAME TO task_events;
                 COMMIT;"#,
             )
             .execute(&self.pool)
             .await?;
+        }
+
+        // Schema bookkeeping: detection above is structural (column presence),
+        // so user_version is telemetry for operators, not a migration gate.
+        let version: i32 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&self.pool)
+            .await?;
+        if version < 2 {
+            sqlx::query("PRAGMA user_version = 2")
+                .execute(&self.pool)
+                .await?;
         }
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id)")
@@ -243,7 +283,7 @@ impl TaskRegistry {
 
     pub async fn get_logs(&self, task_id: &str, limit: i64) -> Result<Vec<TaskEvent>, sqlx::Error> {
         let rows = sqlx::query_as::<_, TaskEventRow>(
-            "SELECT id, task_id, event_type, level, message, data, created_at FROM task_events WHERE task_id = $1 ORDER BY created_at DESC LIMIT $2",
+            "SELECT seq, id, task_id, event_type, level, message, data, created_at FROM task_events WHERE task_id = $1 ORDER BY seq DESC LIMIT $2",
         )
         .bind(task_id)
         .bind(limit)
@@ -283,6 +323,7 @@ impl From<TaskRow> for Task {
 
 #[derive(Debug, sqlx::FromRow)]
 struct TaskEventRow {
+    seq: i64,
     id: String,
     task_id: String,
     event_type: String,
@@ -296,6 +337,7 @@ impl From<TaskEventRow> for TaskEvent {
     fn from(row: TaskEventRow) -> Self {
         let data = row.data.and_then(|s| serde_json::from_str(&s).ok());
         TaskEvent {
+            seq: row.seq,
             id: row.id,
             task_id: row.task_id,
             event_type: row.event_type,

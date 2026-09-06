@@ -152,6 +152,8 @@ Podman rootless (if socket compromised):
 | `ALLOW_HOST_NETWORK` | `false` | Allow `networkMode: host` |
 | `DATABASE_URL` | `sqlite:./data/agentic_armor.db` | SQLite database location (sqlite: URLs only; WAL enabled) |
 | `CONTAINER_USERNS_MODE` | _(unset)_ | Per-container user namespace — `auto` on Podman rootless, or a daemon remap name with Docker userns-remap. Unset by default: plain dockerd rejects per-container userns |
+| `TASK_NETWORK_EGRESS` | `masquerade` | `internal` creates per-task networks with `internal=true`: no outbound routing at all, bridge-task exfiltration fails closed instead of by-design. `masquerade` keeps stock Docker NAT; unknown values fail open to `masquerade` |
+| `AA_HANDLER_TIMEOUT_SECS` | `900` | Ceiling for any single tool call, including `task_exec`'s own kill-and-report cycle. `task_exec` `timeout` values within one second of this ceiling are rejected up front rather than racing the handler cancellation |
 
 ## Security Defaults
 
@@ -180,7 +182,9 @@ cargo run           # Run test container lifecycle
 python3 tests/adversarial/runner.py --all   # full suite (~1h), results in tests/adversarial/reports/
 ```
 
-Every `task_exec` attempt is persisted to the audit trail (`exec_logged` events, surfaced by `task_logs`). Commands that exceed their `timeout` are terminated with a process-group SIGKILL covering the command and its process group (a payload that calls `setsid` can escape the group — the exec wrapper's death is observed either way, so verification confirms the wrapper, not every descendant). The kill is verified by re-inspecting the exec: result notes and the `exec_logged` audit entry record `timedOut=true kill=verified|unverified|undeliverable`, and an undeliverable kill is reported as such rather than as success. Set `blockNpmScripts: true` on `task_create` to set `NPM_CONFIG_IGNORE_SCRIPTS=1` in the container so npm lifecycle scripts (pre/postinstall) cannot run.
+Every `task_exec` attempt is persisted to the audit trail (`exec_logged` events, surfaced by `task_logs`). Commands that exceed their `timeout` are terminated with a process-group SIGKILL covering the command and its process group (a payload that calls `setsid` can escape the group — the exec wrapper's death is observed either way, so verification confirms the wrapper, not every descendant). The kill is verified by re-inspecting the exec: result notes and the `exec_logged` audit entry record `timedOut=true kill=verified|unverified|undeliverable|host-escalated`, and an undeliverable kill is reported as such rather than as success. If the container-side kill is launched but termination cannot be verified, the warden escalates: the payload's host-namespace PID is resolved, its membership in the task's container is verified against `/proc/<pid>/cgroup` (refusing to signal a recycled PID), and a host-side SIGKILL is delivered — recorded as `kill=verified` (termination confirmed) or `kill=host-escalated` (signal delivered, termination unconfirmed). Set `blockNpmScripts: true` on `task_create` to set `NPM_CONFIG_IGNORE_SCRIPTS=1` in the container so npm lifecycle scripts (pre/postinstall) cannot run.
+
+Audit events carry a monotonic `seq` (stable ordering under same-second bursts, never reused). If the database is unavailable when a failure-path audit event must be written, the event parks in `tombstones.jsonl` beside the database file and replays into the trail at next boot with its original timestamp and a provenance prefix — the gap stays visible instead of silently disappearing.
 
 ---
 

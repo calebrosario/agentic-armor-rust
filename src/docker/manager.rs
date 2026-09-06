@@ -210,6 +210,15 @@ pub fn exec_wrap_command(pid_file: &str, command: &[String]) -> Vec<String> {
 /// Attempts to kill the process group recorded in `pid_file` (SIGKILL) and removes
 /// the file. Best-effort: errors are suppressed inside the command; the caller
 /// verifies whether the exec actually stopped.
+/// A cgroup file names a container when one path segment embeds its id —
+/// covers both cgroupfs (`/docker/<id>`) and systemd
+/// (`/system.slice/docker-<id>.scope`) layouts.
+pub fn cgroup_contains_container(cgroup: &str, container_id: &str) -> bool {
+    cgroup
+        .split('/')
+        .any(|segment| segment.contains(container_id))
+}
+
 pub fn exec_kill_command(pid_file: &str) -> Vec<String> {
     vec![
         "sh".to_string(),
@@ -378,8 +387,26 @@ impl ContainerRuntime for BollardRuntime {
                             kill_outcome = KillOutcome::Verified;
                             format!("[agentic-armor] exec timed out after {}ms — timeout kill confirmed: the exec is no longer running", timeout_ms)
                         } else if kill_launched {
-                            kill_outcome = KillOutcome::SentUnverified;
-                            format!("[agentic-armor] exec timed out after {}ms — SIGKILL was sent but termination could NOT be verified; the payload may still be running inside the container", timeout_ms)
+                            match self.host_kill_exec_payload(&exec_id, id).await {
+                                Some(pid) => {
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
+                                    let now_stopped = matches!(
+                                        self.docker.inspect_exec(&exec_id).await,
+                                        Ok(inspect) if inspect.running == Some(false)
+                                    );
+                                    if now_stopped {
+                                        kill_outcome = KillOutcome::Verified;
+                                        format!("[agentic-armor] exec timed out after {}ms — termination confirmed after host-side SIGKILL to pid {} (container membership verified via cgroup)", timeout_ms, pid)
+                                    } else {
+                                        kill_outcome = KillOutcome::HostEscalated;
+                                        format!("[agentic-armor] exec timed out after {}ms — host-side SIGKILL delivered to pid {} (container membership verified via cgroup) but termination could NOT be confirmed; the payload may still be running inside the container", timeout_ms, pid)
+                                    }
+                                }
+                                None => {
+                                    kill_outcome = KillOutcome::SentUnverified;
+                                    format!("[agentic-armor] exec timed out after {}ms — SIGKILL was sent but termination could NOT be verified; the payload may still be running inside the container", timeout_ms)
+                                }
+                            }
                         } else {
                             kill_outcome = KillOutcome::NotDelivered;
                             format!("[agentic-armor] exec timed out after {}ms — the kill command could NOT be delivered; the payload may still be running inside the container", timeout_ms)
@@ -435,13 +462,8 @@ impl ContainerRuntime for BollardRuntime {
         {
             return Ok(());
         }
-        self.docker
-            .create_network(bollard::network::CreateNetworkOptions {
-                name: name.to_string(),
-                check_duplicate: true,
-                ..Default::default()
-            })
-            .await?;
+        let options = Self::network_create_options(name, self.config.task_network_egress.clone());
+        self.docker.create_network(options).await?;
         Ok(())
     }
 
@@ -452,6 +474,63 @@ impl ContainerRuntime for BollardRuntime {
 }
 
 impl BollardRuntime {
+    async fn host_kill_exec_payload(&self, exec_id: &str, container_id: &str) -> Option<i64> {
+        let inspect = self.docker.inspect_exec(exec_id).await.ok()?;
+        if inspect.running != Some(true) {
+            return None;
+        }
+        let pid = inspect.pid?;
+        if pid <= 1 {
+            return None;
+        }
+        let full_id = self
+            .docker
+            .inspect_container(container_id, None)
+            .await
+            .ok()?
+            .id?;
+        let cgroup = tokio::fs::read_to_string(format!("/proc/{}/cgroup", pid))
+            .await
+            .ok()?;
+        if !cgroup_contains_container(&cgroup, &full_id) {
+            warn!(
+                "Refusing host-side kill of pid {}: cgroup {} does not name container {}",
+                pid, cgroup, full_id
+            );
+            return None;
+        }
+        let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        if rc == 0 {
+            info!(
+                "Host-side SIGKILL delivered to exec payload pid {} of container {}",
+                pid, full_id
+            );
+            Some(pid)
+        } else {
+            warn!(
+                "Host-side kill of pid {} failed: {}",
+                pid,
+                std::io::Error::last_os_error()
+            );
+            None
+        }
+    }
+
+    pub fn network_create_options(
+        name: &str,
+        egress: crate::config::TaskNetworkEgress,
+    ) -> bollard::network::CreateNetworkOptions<String> {
+        let mut options = bollard::network::CreateNetworkOptions {
+            name: name.to_string(),
+            check_duplicate: true,
+            ..Default::default()
+        };
+        if egress == crate::config::TaskNetworkEgress::Internal {
+            options.internal = true;
+        }
+        options
+    }
+
     pub fn build_bollard_config(
         config: &ArmorContainerConfig,
         runtime_config: &Config,

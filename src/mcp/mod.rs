@@ -1,3 +1,3 @@
 pub mod server;
 
-pub use server::start;
+pub use server::{replay_tombstones, start};

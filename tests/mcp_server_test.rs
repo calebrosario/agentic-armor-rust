@@ -701,3 +701,47 @@ fn stop_delete_error_classification_separates_benign_from_real_failures() {
         "real destroy failures must retain the row"
     );
 }
+
+#[tokio::test]
+async fn tombstoned_audit_events_replay_into_the_database() {
+    let path = std::env::temp_dir().join(format!("aa-tombstones-{}.jsonl", uuid::Uuid::new_v4()));
+    let line = serde_json::json!({
+        "ts": "2026-09-03T00:00:00+00:00",
+        "task_id": "t-tomb",
+        "event_type": "stop_failed",
+        "message": "boom"
+    })
+    .to_string();
+    std::fs::write(&path, format!("{}\nnot json\n", line)).expect("write tombstone file");
+
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("in-memory pool");
+    let registry = agentic_armor::task::TaskRegistry::new(pool);
+    registry.migrate().await.expect("migrate");
+
+    let replayed = agentic_armor::mcp::replay_tombstones(&registry, &path).await;
+    assert_eq!(replayed, 1, "one valid line replays");
+    assert!(
+        !path.exists(),
+        "fully-replayed tombstone file (with only droppable corrupt lines) is removed"
+    );
+
+    let logs = registry.get_logs("t-tomb", 10).await.expect("logs");
+    assert_eq!(logs.len(), 1);
+    let message = logs[0].message.as_deref().unwrap_or("");
+    assert!(
+        message.contains(
+            "[replayed from tombstone, originally recorded 2026-09-03T00:00:00+00:00] boom"
+        ),
+        "replayed event keeps original content plus provenance, got: {}",
+        message
+    );
+    assert_eq!(
+        agentic_armor::mcp::replay_tombstones(&registry, &path).await,
+        0,
+        "second replay after removal is a no-op"
+    );
+}
