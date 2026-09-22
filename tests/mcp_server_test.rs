@@ -785,26 +785,25 @@ fn download_payload_roundtrips_text_and_binary() {
     use agentic_armor::mcp::server::{base64_decode, base64_encode_bytes, decode_download_payload};
 
     let text = "hello\nworld\n";
-    let (content, encoding, bytes, truncated) =
-        decode_download_payload(&base64_encode_bytes(text.as_bytes()), 1024).unwrap();
-    assert_eq!(content, text);
-    assert_eq!(encoding, "utf8");
-    assert_eq!(bytes, text.len());
-    assert!(!truncated);
+    let d = decode_download_payload(&base64_encode_bytes(text.as_bytes()), 1024).unwrap();
+    assert_eq!(d.content, text);
+    assert_eq!(d.encoding, "utf8");
+    assert_eq!(d.bytes, text.len());
+    assert!(!d.truncated);
 
     let binary: Vec<u8> = vec![
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xFF, 0x00, 0x81,
     ];
     let b64 = base64_encode_bytes(&binary);
-    let (content, encoding, bytes, truncated) = decode_download_payload(&b64, 1024).unwrap();
+    let d = decode_download_payload(&b64, 1024).unwrap();
     assert_eq!(
-        encoding, "base64",
+        d.encoding, "base64",
         "invalid-UTF-8 payloads must not be mangled through lossy conversion"
     );
-    assert_eq!(bytes, binary.len());
-    assert!(!truncated);
+    assert_eq!(d.bytes, binary.len());
+    assert!(!d.truncated);
     assert_eq!(
-        base64_decode(&content).unwrap(),
+        base64_decode(&d.content).unwrap(),
         binary,
         "client can decode losslessly"
     );
@@ -815,19 +814,17 @@ fn download_truncation_flag_counts_decoded_bytes_exactly() {
     use agentic_armor::mcp::server::{base64_encode_bytes, decode_download_payload};
 
     let exact = "x".repeat(16);
-    let (_, _, bytes, truncated) =
-        decode_download_payload(&base64_encode_bytes(exact.as_bytes()), 16).unwrap();
-    assert_eq!(bytes, 16);
+    let d = decode_download_payload(&base64_encode_bytes(exact.as_bytes()), 16).unwrap();
+    assert_eq!(d.bytes, 16);
     assert!(
-        truncated,
+        d.truncated,
         "exactly max bytes counts as truncated (head -c may have cut the file)"
     );
 
     let under = "y".repeat(15);
-    let (_, _, bytes, truncated) =
-        decode_download_payload(&base64_encode_bytes(under.as_bytes()), 16).unwrap();
-    assert_eq!(bytes, 15);
-    assert!(!truncated);
+    let d = decode_download_payload(&base64_encode_bytes(under.as_bytes()), 16).unwrap();
+    assert_eq!(d.bytes, 15);
+    assert!(!d.truncated);
 }
 
 #[test]

@@ -612,7 +612,7 @@ async fn register_task_download(
                         return Ok(CallToolResult::error(format!("Download failed: {}", rendered)));
                     }
 
-                    let (content, encoding, bytes, truncated) = match decode_download_payload(&result.stdout, max_bytes) {
+                    let downloaded = match decode_download_payload(&result.stdout, max_bytes) {
                         Ok(v) => v,
                         Err(e) => {
                             audit_event(&reg, task_id, "download_failed", &format!("download {} decode error: {}", path, e)).await;
@@ -620,15 +620,15 @@ async fn register_task_download(
                         }
                     };
 
-                    let audited = audit_event(&reg, task_id, "file_downloaded", &format!("download {} -> {} bytes (encoding={}, truncated={})", path, bytes, encoding, truncated)).await;
+                    let audited = audit_event(&reg, task_id, "file_downloaded", &format!("download {} -> {} bytes (encoding={}, truncated={})", path, downloaded.bytes, downloaded.encoding, downloaded.truncated)).await;
 
                     Ok(CallToolResult::text(json!({
                         "success": true,
                         "path": path,
-                        "content": content,
-                        "encoding": encoding,
-                        "bytes": bytes,
-                        "truncated": truncated,
+                        "content": downloaded.content,
+                        "encoding": downloaded.encoding,
+                        "bytes": downloaded.bytes,
+                        "truncated": downloaded.truncated,
                         "audited": audited
                     }).to_string()))
                 }
@@ -1226,22 +1226,38 @@ pub fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// Turns container-side base64 into the task_download payload: valid UTF-8
-/// round-trips exactly (`encoding: "utf8"`); anything else is returned as the
-/// base64 string itself (`encoding: "base64"`) for lossless client decoding.
-/// `bytes` counts decoded bytes, making `truncated` exact.
-pub fn decode_download_payload(
-    b64: &str,
-    max_bytes: usize,
-) -> Result<(String, &'static str, usize, bool), String> {
+/// Decoded result of a task_download: `content` is the exact text when the
+/// file is valid UTF-8 (`encoding: "utf8"`) or the base64 string for binary
+/// files (`encoding: "base64"`); `bytes` counts decoded bytes so `truncated`
+/// is exact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadedFile {
+    pub content: String,
+    pub encoding: &'static str,
+    pub bytes: usize,
+    pub truncated: bool,
+}
+
+pub fn decode_download_payload(b64: &str, max_bytes: usize) -> Result<DownloadedFile, String> {
     let b64 = b64.trim();
     let decoded = base64_decode(b64)?;
     let bytes = decoded.len();
     let truncated = bytes >= max_bytes;
-    match String::from_utf8(decoded) {
-        Ok(text) => Ok((text, "utf8", bytes, truncated)),
-        Err(_) => Ok((b64.to_string(), "base64", bytes, truncated)),
-    }
+    let payload = match String::from_utf8(decoded) {
+        Ok(text) => DownloadedFile {
+            content: text,
+            encoding: "utf8",
+            bytes,
+            truncated,
+        },
+        Err(_) => DownloadedFile {
+            content: b64.to_string(),
+            encoding: "base64",
+            bytes,
+            truncated,
+        },
+    };
+    Ok(payload)
 }
 
 pub fn shell_quote(s: &str) -> String {
