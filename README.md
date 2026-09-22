@@ -60,7 +60,7 @@ Every container created by Agentic Armor is hardened — **non-overridable by de
 | Process limit | 100 PIDs | ❌ Clamped (10-1000) |
 | Max concurrent containers | 10 | ❌ DoS protection (serialized within one armor process; multiple armor processes sharing one `DATABASE_URL` each get their own count) |
 | Path access (upload/download) | `/tmp/`, `/home/opencode/`, `/workspace/` only | ❌ Prefix + char allowlist |
-| Mount validation | Canonicalized paths + forbidden patterns | ❌ Symlink-aware |
+| Mount validation | Blocklist (sockets/daemon paths) **plus** canonicalized source allowlist (`ALLOWED_MOUNT_PREFIXES`; empty = deny all bind/volume) | ❌ Symlink-aware, fail closed |
 
 **What the agent CAN do:** edit files in `/workspace/`, run builds, execute tests, install packages (if network enabled), read/write to allowed paths.
 
@@ -154,6 +154,8 @@ Podman rootless (if socket compromised):
 | `CONTAINER_USERNS_MODE` | _(unset)_ | Per-container user namespace — `auto` on Podman rootless, or a daemon remap name with Docker userns-remap. Unset by default: plain dockerd rejects per-container userns |
 | `TASK_NETWORK_EGRESS` | `masquerade` | `internal` creates per-task networks with `internal=true`: no outbound routing at all, bridge-task exfiltration fails closed instead of by-design. `masquerade` keeps stock Docker NAT; unknown values fail open to `masquerade` |
 | `AA_HANDLER_TIMEOUT_SECS` | `900` | Ceiling for any single tool call, including `task_exec`'s own kill-and-report cycle. `task_exec` `timeout` values within one second of this ceiling are rejected up front rather than racing the handler cancellation |
+| `ALLOWED_IMAGES` | built-in sandbox images | Comma-separated image allowlist. Replaces the defaults when set; empty/unset keeps the built-in sandbox images (the allowlist cannot be emptied by accident) |
+| `ALLOWED_MOUNT_PREFIXES` | _(empty = deny all)_ | Comma-separated host roots allowed as bind/volume mount sources, judged on the canonicalized path (symlink-aware, sibling-prefix safe; tmpfs unaffected). MCP-created tasks mount tmpfs only — this gates library consumers of the crate API |
 
 ## Security Defaults
 
@@ -170,7 +172,7 @@ Every container gets:
 
 ```bash
 cargo build
-cargo test          # 62 tests
+cargo test          # 92 tests
 cargo run           # Run test container lifecycle
 ```
 
@@ -400,9 +402,9 @@ Create a task called "test" with taskId "test-1", then list all tasks.
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
 | `task_create` | Create sandboxed task + Docker container | `taskId`, `name`, `image?`, `owner?`, `network?`, `blockNpmScripts?` |
-| `task_exec` | Run command inside sandbox | `taskId`, `command` (string[]), `timeout?` |
+| `task_exec` | Run command inside sandbox | `taskId`, `command` (string[]), `timeout?`, `env?` (KEY=VALUE array) |
 | `task_upload` | Write file into container (restricted paths) | `taskId`, `path`, `content` (max 10MB) |
-| `task_download` | Read file from container (restricted paths) | `taskId`, `path` |
+| `task_download` | Read file from container (restricted paths) | `taskId`, `path` — text returns `encoding:"utf8"`, binary returns base64 with `encoding:"base64"` |
 | `task_list` | List all tasks | `limit?` (max 1000) |
 | `task_stop` | Stop a running task | `taskId` |
 | `task_delete` | Delete task + destroy container | `taskId` |
