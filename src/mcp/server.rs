@@ -187,9 +187,8 @@ async fn register_task_create(
                         Err(e) => return Ok(CallToolResult::error(e)),
                     };
 
-                    if task_id.is_empty() || task_id.len() > 128 ||
-                       !task_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-                        return Ok(CallToolResult::error("Invalid taskId: must match ^[a-zA-Z0-9_-]{1,128}$"));
+                    if let Err(e) = validate_task_id(task_id) {
+                        return Ok(CallToolResult::error(e));
                     }
 
                     let name = match arg_opt_str(&args, "name") {
@@ -980,6 +979,28 @@ pub fn is_no_such_container_error(err: &str) -> bool {
 
 pub fn is_valid_network_mode(mode: &str) -> bool {
     matches!(mode, "none" | "bridge")
+}
+
+/// Maximum taskId length. Container and per-task network names are derived as
+/// `armor-<taskId>`, and the runtime caps network names at 64 chars — so the
+/// id itself may be at most 58. Rejecting here, before any side effects,
+/// prevents bridge tasks from failing late (after the network is created)
+/// inside `docker_network_mode` with a confusing network-name error.
+pub const MAX_TASK_ID_LEN: usize = 58;
+
+pub fn validate_task_id(task_id: &str) -> Result<(), String> {
+    if task_id.is_empty()
+        || task_id.len() > MAX_TASK_ID_LEN
+        || !task_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "Invalid taskId: must match ^[a-zA-Z0-9_-]{{1,{}}}$ (the cap exists because network names 'armor-<taskId>' are limited to 64 chars)",
+            MAX_TASK_ID_LEN
+        ));
+    }
+    Ok(())
 }
 
 pub fn validate_path(path: &str, config: &Config) -> Result<(), String> {

@@ -745,3 +745,21 @@ async fn tombstoned_audit_events_replay_into_the_database() {
         "second replay after removal is a no-op"
     );
 }
+
+#[test]
+fn task_id_length_caps_at_58_for_network_name_room() {
+    use agentic_armor::mcp::server::{validate_task_id, MAX_TASK_ID_LEN};
+
+    assert!(validate_task_id("ok-ID_01").is_ok());
+    assert!(validate_task_id("").is_err());
+    assert!(validate_task_id("bad/id").is_err());
+    assert!(validate_task_id("has space").is_err());
+
+    assert_eq!(MAX_TASK_ID_LEN, 58);
+    let max_id = "a".repeat(58);
+    assert!(validate_task_id(&max_id).is_ok());
+    let too_long = "a".repeat(59);
+    assert!(validate_task_id(&too_long).is_err());
+    // 59 chars would produce a 65-char network name, over the runtime's 64 cap
+    assert!(format!("armor-{}", too_long).len() > 64);
+}
