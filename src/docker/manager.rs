@@ -577,6 +577,28 @@ impl BollardRuntime {
                                 ));
                             }
                         }
+                        let under_allowed_root =
+                            runtime_config.allowed_mount_prefixes.iter().any(|prefix| {
+                                let prefix = prefix.trim_end_matches('/').to_lowercase();
+                                source_to_check == prefix
+                                    || source_to_check.starts_with(&format!("{}/", prefix))
+                            });
+                        if !under_allowed_root {
+                            warn!(
+                                "Mount source '{}' is outside ALLOWED_MOUNT_PREFIXES — rejecting",
+                                mount.source
+                            );
+                            return Err(ArmorError::ForbiddenMount(
+                                if runtime_config.allowed_mount_prefixes.is_empty() {
+                                    "bind/volume mounts are disabled — set ALLOWED_MOUNT_PREFIXES to allow specific host roots".to_string()
+                                } else {
+                                    format!(
+                                        "mount source '{}' is not under any ALLOWED_MOUNT_PREFIXES root",
+                                        mount.source
+                                    )
+                                },
+                            ));
+                        }
                         let ro = mount.read_only.unwrap_or(false);
                         binds.push(format!(
                             "{}:{}{}",

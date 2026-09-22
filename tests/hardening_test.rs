@@ -89,8 +89,15 @@ fn docker_socket_mounts_are_rejected() {
         }]),
         ..base_config()
     };
-    let err = BollardRuntime::build_bollard_config(&cfg, &Config::default()).unwrap_err();
-    assert!(matches!(err, agentic_armor::ArmorError::ForbiddenMount(_)));
+    let allow_all_roots = Config {
+        allowed_mount_prefixes: vec!["/".into()],
+        ..Config::default()
+    };
+    let err = BollardRuntime::build_bollard_config(&cfg, &allow_all_roots).unwrap_err();
+    assert!(
+        matches!(err, agentic_armor::ArmorError::ForbiddenMount(_)),
+        "with the allowlist wide open, only the socket blocklist can reject this: {err}"
+    );
 }
 
 #[test]
@@ -163,6 +170,7 @@ fn forbidden_mount_patterns_are_read_from_config_not_hardcoded() {
     };
     let cfg = Config {
         forbidden_mount_patterns: vec!["topsecret".into()],
+        allowed_mount_prefixes: vec!["/srv".into()],
         ..Config::default()
     };
     let err = BollardRuntime::build_bollard_config(&hostile, &cfg).unwrap_err();
@@ -173,6 +181,7 @@ fn forbidden_mount_patterns_are_read_from_config_not_hardcoded() {
 
     let permissive = Config {
         forbidden_mount_patterns: vec![],
+        allowed_mount_prefixes: vec!["/srv".into()],
         ..Config::default()
     };
     assert!(
@@ -190,7 +199,14 @@ fn forbidden_mount_patterns_are_read_from_config_not_hardcoded() {
         }]),
         ..base_config()
     };
-    assert!(BollardRuntime::build_bollard_config(&via_target, &Config::default()).is_err());
+    let allow_data = Config {
+        allowed_mount_prefixes: vec!["/".into()],
+        ..Config::default()
+    };
+    assert!(
+        BollardRuntime::build_bollard_config(&via_target, &allow_data).is_err(),
+        "with the allowlist satisfied, the target-side pattern must still reject"
+    );
 }
 
 #[test]
@@ -251,4 +267,110 @@ fn handler_ceiling_defaults_high_enough_for_real_builds() {
         900,
         "default ceiling must accommodate multi-minute builds and test suites"
     );
+}
+
+#[test]
+fn bind_mounts_are_denied_by_default() {
+    let cfg = ArmorContainerConfig {
+        mounts: Some(vec![Mount {
+            source: "/etc".into(),
+            target: "/workspace/etc".into(),
+            mount_type: "bind".into(),
+            read_only: Some(true),
+            tmpfs_options: None,
+        }]),
+        ..base_config()
+    };
+    let err = BollardRuntime::build_bollard_config(&cfg, &Config::default()).unwrap_err();
+    assert!(
+        matches!(err, agentic_armor::ArmorError::ForbiddenMount(_)),
+        "no ALLOWED_MOUNT_PREFIXES configured — bind mounts must fail closed: {err}"
+    );
+}
+
+#[test]
+fn bind_mounts_are_allowed_only_under_a_configured_root() {
+    let rc = Config {
+        allowed_mount_prefixes: vec!["/mnt/sandboxes".into()],
+        ..Config::default()
+    };
+    let cfg = ArmorContainerConfig {
+        mounts: Some(vec![Mount {
+            source: "/mnt/sandboxes/task-1".into(),
+            target: "/workspace/task".into(),
+            mount_type: "bind".into(),
+            read_only: Some(false),
+            tmpfs_options: None,
+        }]),
+        ..base_config()
+    };
+    let out = BollardRuntime::build_bollard_config(&cfg, &rc).unwrap();
+    let binds = out.host_config.unwrap().binds.expect("binds");
+    assert_eq!(
+        binds,
+        vec!["/mnt/sandboxes/task-1:/workspace/task".to_string()]
+    );
+
+    let sibling = ArmorContainerConfig {
+        mounts: Some(vec![Mount {
+            source: "/mnt/sandboxes-evil/task-1".into(),
+            target: "/workspace/task".into(),
+            mount_type: "bind".into(),
+            read_only: Some(false),
+            tmpfs_options: None,
+        }]),
+        ..base_config()
+    };
+    assert!(
+        BollardRuntime::build_bollard_config(&sibling, &rc).is_err(),
+        "a string-prefix sibling like /mnt/sandboxes-evil must not sneak past /mnt/sandboxes"
+    );
+}
+
+#[test]
+fn symlinked_sources_are_judged_by_their_canonical_target() {
+    let base = std::env::temp_dir().join(format!("aa-mount-{}", std::process::id()));
+    let allowed = base.join("allowed");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(&allowed).expect("create allowed root");
+    std::fs::create_dir_all(&outside).expect("create outside root");
+    let allowed_root = std::fs::canonicalize(&allowed).unwrap_or(allowed.clone());
+    let link = allowed.join("escape");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+
+    let rc = Config {
+        allowed_mount_prefixes: vec![allowed_root.to_string_lossy().into_owned()],
+        ..Config::default()
+    };
+
+    let escape = ArmorContainerConfig {
+        mounts: Some(vec![Mount {
+            source: link.to_string_lossy().into_owned(),
+            target: "/workspace/escape".into(),
+            mount_type: "bind".into(),
+            read_only: Some(false),
+            tmpfs_options: None,
+        }]),
+        ..base_config()
+    };
+    assert!(
+        BollardRuntime::build_bollard_config(&escape, &rc).is_err(),
+        "a symlink inside the allowed root pointing outside must resolve to the outside target and be denied"
+    );
+
+    let legit = ArmorContainerConfig {
+        mounts: Some(vec![Mount {
+            source: allowed_root.to_string_lossy().into_owned(),
+            target: "/workspace/legit".into(),
+            mount_type: "bind".into(),
+            read_only: Some(true),
+            tmpfs_options: None,
+        }]),
+        ..base_config()
+    };
+    assert!(BollardRuntime::build_bollard_config(&legit, &rc).is_ok());
+
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_dir_all(&base);
 }
