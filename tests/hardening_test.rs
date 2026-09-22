@@ -107,7 +107,10 @@ fn images_outside_the_allowlist_are_rejected() {
         ..base_config()
     };
     let err = BollardRuntime::build_bollard_config(&cfg, &Config::default()).unwrap_err();
-    assert!(matches!(err, agentic_armor::ArmorError::ForbiddenMount(_)));
+    assert!(
+        matches!(&err, agentic_armor::ArmorError::ImageNotAllowed(image) if image == "ubuntu:latest"),
+        "image rejection has its own variant, not ForbiddenMount: {err}"
+    );
 }
 
 #[test]

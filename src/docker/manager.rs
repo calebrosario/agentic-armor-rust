@@ -540,7 +540,7 @@ impl BollardRuntime {
             .iter()
             .any(|img| img == &config.image)
         {
-            return Err(ArmorError::ForbiddenMount("Image not allowed".to_string()));
+            return Err(ArmorError::ImageNotAllowed(config.image.clone()));
         }
 
         let cmd = config.command.clone();
