@@ -344,8 +344,24 @@ fn audit_command_truncates_at_512_chars_on_char_boundary() {
     assert!(t.chars().count() <= 512);
     assert!(t.is_char_boundary(t.len()), "must end on a UTF-8 boundary");
 
-    assert_eq!(audit_command(&[]), "");
-    assert_eq!(audit_command(&["echo".into(), "hi".into()]), "echo hi");
+    assert_eq!(audit_command(&[]), "[]");
+    assert_eq!(
+        audit_command(&["echo".into(), "hi".into()]),
+        "[\"echo\",\"hi\"]"
+    );
+}
+
+#[test]
+fn audit_command_preserves_argument_boundaries() {
+    use agentic_armor::mcp::server::audit_command;
+    let one_arg = audit_command(&["rm -rf /".into()]);
+    let two_args = audit_command(&["rm".into(), "-rf".into(), "/".into()]);
+    assert_eq!(one_arg, "[\"rm -rf /\"]");
+    assert_eq!(two_args, "[\"rm\",\"-rf\",\"/\"]");
+    assert_ne!(
+        one_arg, two_args,
+        "space-joining made ['a b'] and ['a','b'] forensically indistinguishable"
+    );
 }
 
 #[test]

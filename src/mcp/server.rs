@@ -1278,7 +1278,11 @@ pub fn exec_audit_message(
 }
 
 pub fn audit_command(command: &[String]) -> String {
-    command.join(" ").chars().take(512).collect()
+    serde_json::to_string(command)
+        .unwrap_or_else(|_| "[]".into())
+        .chars()
+        .take(512)
+        .collect()
 }
 
 async fn resolve_path_in_container(
