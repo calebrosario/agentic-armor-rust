@@ -1,0 +1,76 @@
+#!/bin/bash
+#
+# Global Pre-Commit Hook
+# Auto-syncs Obsidian knowledge base before code commits
+#
+
+set -e
+
+KNOWLEDGE_BASE="${KNOWLEDGE_BASE:-$HOME/KnowledgeBase}"
+CURRENT_DIR=$(pwd)
+CURRENT_REPO=$(basename "$CURRENT_DIR")
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+log() { echo -e "${GREEN}[pre-commit]${NC} $1"; }
+warn() { echo -e "${YELLOW}[pre-commit]${NC} $1"; }
+
+# Skip if we're in the knowledge base itself
+if [[ "$CURRENT_DIR" == "$KNOWLEDGE_BASE"* ]]; then
+    exit 0
+fi
+
+# Sync knowledge base
+cd "$KNOWLEDGE_BASE" 2>/dev/null || exit 0
+
+# Check for changes
+if [[ -n $(git status --porcelain 2>/dev/null) ]]; then
+    log "📝 Auto-syncing knowledge base..."
+    
+    # Add all changes
+    git add . >/dev/null 2>&1
+    
+    # Commit with timestamp
+    git commit -m "auto: sync knowledge base before code commit in $CURRENT_REPO [$(date '+%Y-%m-%d %H:%M:%S')]" >/dev/null 2>&1
+    
+    # Push to remote (don't fail if no remote)
+    if git push origin main 2>/dev/null || git push origin master 2>/dev/null; then
+        log "✅ Knowledge base synced"
+    else
+        warn "⚠️  Knowledge base committed but not pushed (no remote or offline)"
+    fi
+else
+    # Still try to pull latest
+    git pull origin main 2>/dev/null || git pull origin master 2>/dev/null || true
+fi
+
+cd "$CURRENT_DIR"
+exit 0
+
+# --- BEGIN BEADS INTEGRATION v1.0.0 ---
+# This section is managed by beads. Do not remove these markers.
+if command -v bd >/dev/null 2>&1; then
+  export BD_GIT_HOOK=1
+  _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$_bd_timeout" bd hooks run pre-commit "$@"
+    _bd_exit=$?
+    if [ $_bd_exit -eq 124 ]; then
+      echo >&2 "beads: hook 'pre-commit' timed out after ${_bd_timeout}s — continuing without beads"
+      _bd_exit=0
+    fi
+  else
+    bd hooks run pre-commit "$@"
+    _bd_exit=$?
+  fi
+  if [ $_bd_exit -eq 3 ]; then
+    echo >&2 "beads: database not initialized — skipping hook 'pre-commit'"
+    _bd_exit=0
+  fi
+  if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
+fi
+# --- END BEADS INTEGRATION v1.0.0 ---

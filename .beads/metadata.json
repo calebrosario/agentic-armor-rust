@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "agentic_armor_rust",
+  "project_id": "4b6094ac-9d18-4c00-aa4a-431c6262f140"
+}
