@@ -316,6 +316,17 @@ async fn register_task_create(
                         return Ok(CallToolResult::error(format!("Failed to associate container: {}{}", e, cleanup_warning(cleaned))));
                     }
 
+                    let status = match lc.mark_running(task_id).await {
+                        Ok(()) => "running",
+                        Err(e) => {
+                            warn!(
+                                "Failed to mark task {} as running in the registry ({}) — task_list will show 'pending'",
+                                task_id, e
+                            );
+                            "pending"
+                        }
+                    };
+
                     audit_event(&reg, task_id, "container_created", &format!("Container {} started", container_id)).await;
 
                     Ok(CallToolResult::text(json!({
@@ -323,7 +334,7 @@ async fn register_task_create(
                         "taskId": task.id,
                         "name": task.name,
                         "containerId": container_id,
-                        "status": "running"
+                        "status": status
                     }).to_string()))
                 }
             }),

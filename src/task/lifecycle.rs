@@ -60,6 +60,15 @@ impl TaskLifecycle {
         self.get_task(id).await
     }
 
+    /// Marks a task `running` once its container has started, so the registry
+    /// status agrees with what task_create reports.
+    pub async fn mark_running(&self, id: &str) -> ArmorResult<()> {
+        self.registry
+            .update_status(id, TaskStatus::Running)
+            .await
+            .map_err(|e| ArmorError::Database(e.to_string()))
+    }
+
     pub async fn delete_task(&self, id: &str) -> ArmorResult<()> {
         let existed = self
             .registry
