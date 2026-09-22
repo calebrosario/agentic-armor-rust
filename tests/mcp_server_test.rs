@@ -820,3 +820,24 @@ fn download_decode_rejects_garbage() {
 
     assert!(decode_download_payload("not valid base64!!!", 10).is_err());
 }
+
+#[test]
+fn optional_string_arrays_parse_strictly() {
+    use agentic_armor::mcp::server::arg_opt_str_array;
+    use serde_json::json;
+
+    let absent = json!({});
+    assert!(arg_opt_str_array(&absent, "env").unwrap().is_none());
+
+    let present = json!({"env": ["FOO=1", "BAR=two words"]});
+    assert_eq!(
+        arg_opt_str_array(&present, "env").unwrap(),
+        Some(vec!["FOO=1".to_string(), "BAR=two words".to_string()])
+    );
+
+    let wrong_type = json!({"env": "FOO=1"});
+    assert!(arg_opt_str_array(&wrong_type, "env").is_err());
+
+    let wrong_element = json!({"env": ["FOO=1", 42]});
+    assert!(arg_opt_str_array(&wrong_element, "env").is_err());
+}

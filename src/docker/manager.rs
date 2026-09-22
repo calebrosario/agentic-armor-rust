@@ -312,7 +312,7 @@ impl ContainerRuntime for BollardRuntime {
             cmd: Some(wrapped),
             user: request.user.clone(),
             working_dir: request.working_dir.clone(),
-            env: None,
+            env: request.env.clone(),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             ..Default::default()

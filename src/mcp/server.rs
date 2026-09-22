@@ -357,6 +357,11 @@ async fn register_task_exec(
                 "properties": {
                     "taskId": { "type": "string" },
                     "command": { "type": "array", "items": { "type": "string" } },
+                    "env": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional KEY=VALUE environment entries applied to this exec"
+                    },
                     "timeout": {
                         "type": "number",
                         "description": "milliseconds before the warden kills the exec; must stay under the handler ceiling (AA_HANDLER_TIMEOUT_SECS, default 900s)"
@@ -378,6 +383,10 @@ async fn register_task_exec(
                         Err(e) => return Ok(CallToolResult::error(e)),
                     };
                     let timeout_ms = match arg_u64(&args, "timeout") {
+                        Ok(v) => v,
+                        Err(e) => return Ok(CallToolResult::error(e)),
+                    };
+                    let env = match arg_opt_str_array(&args, "env") {
                         Ok(v) => v,
                         Err(e) => return Ok(CallToolResult::error(e)),
                     };
@@ -403,6 +412,7 @@ async fn register_task_exec(
                     let result = match rt.exec_in_container(&container_id, &ExecRequest {
                         command,
                         timeout_ms,
+                        env,
                         ..Default::default()
                     }).await {
                         Ok(r) => r,
@@ -1080,6 +1090,34 @@ pub fn arg_str_array(args: &serde_json::Value, key: &str) -> Result<Vec<String>,
                         })
                     })
                     .collect()
+            }),
+    }
+}
+
+pub fn arg_opt_str_array(
+    args: &serde_json::Value,
+    key: &str,
+) -> Result<Option<Vec<String>>, String> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| format!("argument '{}' must be an array, got {}", key, type_name(v)))
+            .and_then(|a| {
+                a.iter()
+                    .enumerate()
+                    .map(|(i, e)| {
+                        e.as_str().map(String::from).ok_or_else(|| {
+                            format!(
+                                "argument '{}'[{}] must be a string, got {}",
+                                key,
+                                i,
+                                type_name(e)
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Some)
             }),
     }
 }
