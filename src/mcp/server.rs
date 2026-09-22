@@ -1285,6 +1285,11 @@ pub fn audit_command(command: &[String]) -> String {
         .collect()
 }
 
+/// Resolves `path` inside the container (`readlink -f` on the deepest existing
+/// ancestor); callers re-validate the resolved path before use. Residual risk
+/// (accepted, documented in README): resolution and the write run as separate
+/// execs, so an in-container process can race a path-component swap — impact
+/// is confined to in-container integrity, not an escape vector.
 async fn resolve_path_in_container(
     rt: &Arc<dyn ContainerRuntime>,
     container_id: &str,

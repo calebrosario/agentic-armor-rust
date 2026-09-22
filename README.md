@@ -168,6 +168,8 @@ Every container gets:
 - Docker socket mount prevention (source + target)
 - Image allowlist enforcement
 
+**File-transfer hardening, and one honest residual risk:** upload paths are validated host-side, canonicalized inside the container, re-validated against the allowed roots, and guarded against final-component symlinks at write time. Because path resolution and the chunked write run as two separate execs, a hostile process already running inside the task could in principle swap a path component in that window — the impact is confined to in-container file integrity (read-only rootfs, tmpfs-only writable paths) and is not an escape vector. This residual race is accepted and documented rather than hidden.
+
 ## Build & Test
 
 ```bash
