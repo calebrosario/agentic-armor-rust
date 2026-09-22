@@ -89,10 +89,13 @@ impl Default for Config {
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
-            allowed_images: vec![
-                "opencode-sandbox-base:latest".into(),
-                "opencode-sandbox-developer:latest".into(),
-            ],
+            allowed_images: match parse_csv_list(&env::var("ALLOWED_IMAGES").unwrap_or_default()) {
+                configured if !configured.is_empty() => configured,
+                _ => vec![
+                    "opencode-sandbox-base:latest".into(),
+                    "opencode-sandbox-developer:latest".into(),
+                ],
+            },
             allowed_path_prefixes: vec![
                 "/tmp/".into(),
                 "/home/opencode/".into(),

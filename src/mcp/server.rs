@@ -225,7 +225,7 @@ async fn register_task_create(
                     }
 
                     if !cfg.allowed_images.iter().any(|img| img == image) {
-                        return Ok(CallToolResult::error("Image not allowed. Use a pre-approved sandbox image."));
+                        return Ok(CallToolResult::error("Image not allowed. Use a pre-approved sandbox image (configure via ALLOWED_IMAGES)."));
                     }
 
                     let _create_gate = create_gate.lock().await;
