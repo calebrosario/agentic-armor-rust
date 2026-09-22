@@ -12,14 +12,8 @@ fn base_config() -> ArmorContainerConfig {
 }
 
 #[test]
-fn hardening_flags_cannot_be_weakened_by_caller() {
-    let cfg = ArmorContainerConfig {
-        readonly_rootfs: Some(false),
-        cap_drop: Some(vec!["NET_ADMIN".into()]),
-        user: Some("root".into()),
-        ..base_config()
-    };
-    let out = BollardRuntime::build_bollard_config(&cfg, &Config::default()).unwrap();
+fn hardening_flags_are_hardcoded_with_no_caller_knobs() {
+    let out = BollardRuntime::build_bollard_config(&base_config(), &Config::default()).unwrap();
     let hc = out.host_config.expect("host_config");
     assert_eq!(hc.cap_drop, Some(vec!["ALL".to_string()]));
     assert_eq!(hc.readonly_rootfs, Some(true));

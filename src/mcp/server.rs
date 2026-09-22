@@ -277,10 +277,6 @@ async fn register_task_create(
                         memory_limit: Some(cfg.container_memory_mb * 1024 * 1024),
                         cpu_shares: Some(cfg.container_cpu_shares),
                         pids_limit: Some(cfg.container_pids_limit),
-                        readonly_rootfs: Some(true),
-                        no_new_privileges: Some(true),
-                        cap_drop: Some(vec!["ALL".into()]),
-                        user: Some("opencode".into()),
                         env: npm_scripts_blocked_env(block_npm_scripts),
                         mounts: Some(default_task_mounts_for(rt.runtime_name())),
                         ..Default::default()
