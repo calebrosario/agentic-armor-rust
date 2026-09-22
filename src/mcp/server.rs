@@ -159,7 +159,7 @@ async fn register_task_create(
             .schema(json!({
                 "type": "object",
                 "properties": {
-                    "taskId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$" },
+                    "taskId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$", "maxLength": 58 },
                     "name": { "type": "string" },
                     "owner": { "type": "string" },
                     "image": { "type": "string" },

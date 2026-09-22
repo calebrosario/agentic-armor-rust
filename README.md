@@ -155,7 +155,7 @@ Podman rootless (if socket compromised):
 | `TASK_NETWORK_EGRESS` | `masquerade` | `internal` creates per-task networks with `internal=true`: no outbound routing at all, bridge-task exfiltration fails closed instead of by-design. `masquerade` keeps stock Docker NAT; unknown values fail open to `masquerade` |
 | `AA_HANDLER_TIMEOUT_SECS` | `900` | Ceiling for any single tool call, including `task_exec`'s own kill-and-report cycle. `task_exec` `timeout` values within one second of this ceiling are rejected up front rather than racing the handler cancellation |
 | `ALLOWED_IMAGES` | built-in sandbox images | Comma-separated image allowlist. Replaces the defaults when set; empty/unset keeps the built-in sandbox images (the allowlist cannot be emptied by accident) |
-| `ALLOWED_MOUNT_PREFIXES` | _(empty = deny all)_ | Comma-separated host roots allowed as bind/volume mount sources, judged on the canonicalized path (symlink-aware, sibling-prefix safe; tmpfs unaffected). MCP-created tasks mount tmpfs only — this gates library consumers of the crate API |
+| `ALLOWED_MOUNT_PREFIXES` | _(empty = deny all)_ | Comma-separated roots allowed as bind/volume mount sources — paths are judged on the canonicalized location (symlink-aware, sibling-prefix safe, `..` rejected), named volumes by exact name. tmpfs unaffected; MCP-created tasks mount tmpfs only, so this gates library consumers of the crate API |
 
 ## Security Defaults
 
