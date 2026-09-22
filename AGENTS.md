@@ -70,7 +70,7 @@ agentic-armor-rust/
 ## COMMANDS
 
 ```bash
-cargo test --locked         # 92 tests
+cargo test --locked         # 93 tests
 cargo clippy --all-targets --locked
 cargo fmt
 cargo build --release

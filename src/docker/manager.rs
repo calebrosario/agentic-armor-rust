@@ -559,6 +559,17 @@ impl BollardRuntime {
                                 mount.mount_type
                             )));
                         }
+                        if mount.source.split('/').any(|seg| seg == "..")
+                            || mount.target.split('/').any(|seg| seg == "..")
+                        {
+                            warn!(
+                                "Security policy rejected mount '{}:{}' — '..' segment",
+                                mount.source, mount.target
+                            );
+                            return Err(ArmorError::ForbiddenMount(
+                                "mount source/target must not contain '..' segments".into(),
+                            ));
+                        }
                         let source_to_check =
                             if let Ok(canonical) = std::fs::canonicalize(&mount.source) {
                                 canonical.to_string_lossy().to_lowercase()

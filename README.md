@@ -174,7 +174,7 @@ Every container gets:
 
 ```bash
 cargo build
-cargo test          # 92 tests
+cargo test          # 93 tests
 cargo run           # Run test container lifecycle
 ```
 

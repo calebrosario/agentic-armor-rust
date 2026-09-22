@@ -292,6 +292,30 @@ fn bind_mounts_are_denied_by_default() {
 }
 
 #[test]
+fn mount_dotdot_segments_are_rejected_before_the_allowlist() {
+    let rc = Config {
+        allowed_mount_prefixes: vec!["/mnt/sandboxes".into()],
+        ..Config::default()
+    };
+    let cfg = ArmorContainerConfig {
+        mounts: Some(vec![Mount {
+            source: "/mnt/sandboxes/../../etc".into(),
+            target: "/workspace/x".into(),
+            mount_type: "bind".into(),
+            read_only: Some(true),
+            tmpfs_options: None,
+        }]),
+        ..base_config()
+    };
+    let err = BollardRuntime::build_bollard_config(&cfg, &rc).unwrap_err();
+    assert!(
+        matches!(err, agentic_armor::ArmorError::ForbiddenMount(_)),
+        "'..' must be rejected outright — when canonicalize fails, the raw-prefix \
+         check would otherwise treat '/mnt/sandboxes/../..' as inside the root: {err}"
+    );
+}
+
+#[test]
 fn bind_mounts_are_allowed_only_under_a_configured_root() {
     let rc = Config {
         allowed_mount_prefixes: vec!["/mnt/sandboxes".into()],
