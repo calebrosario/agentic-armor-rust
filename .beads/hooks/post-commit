@@ -1,0 +1,24 @@
+#!/bin/bash
+#
+# Global Post-Commit Hook  
+# Auto-creates ADR suggestions for architecture changes
+#
+
+set -e
+
+CURRENT_DIR=$(pwd)
+COMMIT_MSG=$(git log -1 --pretty=%B)
+
+# Check if commit message indicates architectural decision
+if echo "$COMMIT_MSG" | grep -qiE "(arch|refactor|migrate|switch.*to|decision|choose|adopt|implement|remove.*and.*use)"; then
+    echo ""
+    echo "🏛️  Architecture change detected!"
+    echo ""
+    echo "Consider documenting this decision:"
+    echo "  obsidian-agent create-adr \"${COMMIT_MSG:0:50}\""
+    echo ""
+    echo "Or run: obsidian-agent sync-project $(basename "$CURRENT_DIR")"
+    echo ""
+fi
+
+exit 0

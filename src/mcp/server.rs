@@ -159,7 +159,7 @@ async fn register_task_create(
             .schema(json!({
                 "type": "object",
                 "properties": {
-                    "taskId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$" },
+                    "taskId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$", "maxLength": 58 },
                     "name": { "type": "string" },
                     "owner": { "type": "string" },
                     "image": { "type": "string" },
@@ -187,9 +187,8 @@ async fn register_task_create(
                         Err(e) => return Ok(CallToolResult::error(e)),
                     };
 
-                    if task_id.is_empty() || task_id.len() > 128 ||
-                       !task_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-                        return Ok(CallToolResult::error("Invalid taskId: must match ^[a-zA-Z0-9_-]{1,128}$"));
+                    if let Err(e) = validate_task_id(task_id) {
+                        return Ok(CallToolResult::error(e));
                     }
 
                     let name = match arg_opt_str(&args, "name") {
@@ -226,7 +225,7 @@ async fn register_task_create(
                     }
 
                     if !cfg.allowed_images.iter().any(|img| img == image) {
-                        return Ok(CallToolResult::error("Image not allowed. Use a pre-approved sandbox image."));
+                        return Ok(CallToolResult::error("Image not allowed. Use a pre-approved sandbox image (configure via ALLOWED_IMAGES)."));
                     }
 
                     let _create_gate = create_gate.lock().await;
@@ -278,10 +277,6 @@ async fn register_task_create(
                         memory_limit: Some(cfg.container_memory_mb * 1024 * 1024),
                         cpu_shares: Some(cfg.container_cpu_shares),
                         pids_limit: Some(cfg.container_pids_limit),
-                        readonly_rootfs: Some(true),
-                        no_new_privileges: Some(true),
-                        cap_drop: Some(vec!["ALL".into()]),
-                        user: Some("opencode".into()),
                         env: npm_scripts_blocked_env(block_npm_scripts),
                         mounts: Some(default_task_mounts_for(rt.runtime_name())),
                         ..Default::default()
@@ -317,6 +312,17 @@ async fn register_task_create(
                         return Ok(CallToolResult::error(format!("Failed to associate container: {}{}", e, cleanup_warning(cleaned))));
                     }
 
+                    let status = match lc.mark_running(task_id).await {
+                        Ok(()) => "running",
+                        Err(e) => {
+                            warn!(
+                                "Failed to mark task {} as running in the registry ({}) — task_list will show 'pending'",
+                                task_id, e
+                            );
+                            "pending"
+                        }
+                    };
+
                     audit_event(&reg, task_id, "container_created", &format!("Container {} started", container_id)).await;
 
                     Ok(CallToolResult::text(json!({
@@ -324,7 +330,7 @@ async fn register_task_create(
                         "taskId": task.id,
                         "name": task.name,
                         "containerId": container_id,
-                        "status": "running"
+                        "status": status
                     }).to_string()))
                 }
             }),
@@ -351,6 +357,11 @@ async fn register_task_exec(
                 "properties": {
                     "taskId": { "type": "string" },
                     "command": { "type": "array", "items": { "type": "string" } },
+                    "env": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional KEY=VALUE environment entries applied to this exec"
+                    },
                     "timeout": {
                         "type": "number",
                         "description": "milliseconds before the warden kills the exec; must stay under the handler ceiling (AA_HANDLER_TIMEOUT_SECS, default 900s)"
@@ -372,6 +383,10 @@ async fn register_task_exec(
                         Err(e) => return Ok(CallToolResult::error(e)),
                     };
                     let timeout_ms = match arg_u64(&args, "timeout") {
+                        Ok(v) => v,
+                        Err(e) => return Ok(CallToolResult::error(e)),
+                    };
+                    let env = match arg_opt_str_array(&args, "env") {
                         Ok(v) => v,
                         Err(e) => return Ok(CallToolResult::error(e)),
                     };
@@ -397,6 +412,7 @@ async fn register_task_exec(
                     let result = match rt.exec_in_container(&container_id, &ExecRequest {
                         command,
                         timeout_ms,
+                        env,
                         ..Default::default()
                     }).await {
                         Ok(r) => r,
@@ -540,7 +556,7 @@ async fn register_task_download(
 
     server.register_tool(
         ToolBuilder::new("task_download")
-            .description("Read a file from a task's Docker container. Restricted to /tmp/, /home/opencode/, /workspace/. Max 10MB.")
+            .description("Read a file from a task's Docker container. Restricted to /tmp/, /home/opencode/, /workspace/. Max 10MB. Text files return encoding=\"utf8\"; binary files return base64 with encoding=\"base64\" — decode before use.")
             .schema(json!({
                 "type": "object",
                 "properties": {
@@ -579,7 +595,7 @@ async fn register_task_download(
 
                     let max_bytes = 10 * 1024 * 1024;
                     let result = match rt.exec_in_container(&container_id, &ExecRequest {
-                        command: vec!["sh".into(), "-c".into(), format!("head -c {} {}", max_bytes, shell_quote(&resolved))],
+                        command: vec!["sh".into(), "-c".into(), format!("head -c {} {} | base64 | tr -d '\\n'", max_bytes, shell_quote(&resolved))],
                         timeout_ms: Some(30_000),
                         ..Default::default()
                     }).await {
@@ -596,17 +612,23 @@ async fn register_task_download(
                         return Ok(CallToolResult::error(format!("Download failed: {}", rendered)));
                     }
 
-                    let bytes = result.stdout.len();
-                    let truncated = bytes >= max_bytes;
+                    let downloaded = match decode_download_payload(&result.stdout, max_bytes) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            audit_event(&reg, task_id, "download_failed", &format!("download {} decode error: {}", path, e)).await;
+                            return Ok(CallToolResult::error(format!("Download failed: container output was not valid base64: {}", e)));
+                        }
+                    };
 
-                    let audited = audit_event(&reg, task_id, "file_downloaded", &format!("download {} -> {} bytes (truncated={})", path, bytes, truncated)).await;
+                    let audited = audit_event(&reg, task_id, "file_downloaded", &format!("download {} -> {} bytes (encoding={}, truncated={})", path, downloaded.bytes, downloaded.encoding, downloaded.truncated)).await;
 
                     Ok(CallToolResult::text(json!({
                         "success": true,
                         "path": path,
-                        "content": result.stdout,
-                        "bytes": bytes,
-                        "truncated": truncated,
+                        "content": downloaded.content,
+                        "encoding": downloaded.encoding,
+                        "bytes": downloaded.bytes,
+                        "truncated": downloaded.truncated,
                         "audited": audited
                     }).to_string()))
                 }
@@ -982,6 +1004,28 @@ pub fn is_valid_network_mode(mode: &str) -> bool {
     matches!(mode, "none" | "bridge")
 }
 
+/// Maximum taskId length. Container and per-task network names are derived as
+/// `armor-<taskId>`, and the runtime caps network names at 64 chars — so the
+/// id itself may be at most 58. Rejecting here, before any side effects,
+/// prevents bridge tasks from failing late (after the network is created)
+/// inside `docker_network_mode` with a confusing network-name error.
+pub const MAX_TASK_ID_LEN: usize = 58;
+
+pub fn validate_task_id(task_id: &str) -> Result<(), String> {
+    if task_id.is_empty()
+        || task_id.len() > MAX_TASK_ID_LEN
+        || !task_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "Invalid taskId: must match ^[a-zA-Z0-9_-]{{1,{}}}$ (the cap exists because network names 'armor-<taskId>' are limited to 64 chars)",
+            MAX_TASK_ID_LEN
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_path(path: &str, config: &Config) -> Result<(), String> {
     if !path.starts_with('/') {
         return Err("Path must be absolute".into());
@@ -1050,6 +1094,34 @@ pub fn arg_str_array(args: &serde_json::Value, key: &str) -> Result<Vec<String>,
     }
 }
 
+pub fn arg_opt_str_array(
+    args: &serde_json::Value,
+    key: &str,
+) -> Result<Option<Vec<String>>, String> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| format!("argument '{}' must be an array, got {}", key, type_name(v)))
+            .and_then(|a| {
+                a.iter()
+                    .enumerate()
+                    .map(|(i, e)| {
+                        e.as_str().map(String::from).ok_or_else(|| {
+                            format!(
+                                "argument '{}'[{}] must be a string, got {}",
+                                key,
+                                i,
+                                type_name(e)
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Some)
+            }),
+    }
+}
+
 pub fn arg_u64(args: &serde_json::Value, key: &str) -> Result<Option<u64>, String> {
     match args.get(key) {
         None => Ok(None),
@@ -1100,10 +1172,13 @@ async fn audit_event(reg: &TaskRegistry, task_id: &str, event_type: &str, messag
 }
 
 pub fn base64_encode(input: &str) -> String {
+    base64_encode_bytes(input.as_bytes())
+}
+
+pub fn base64_encode_bytes(bytes: &[u8]) -> String {
     use std::fmt::Write;
-    let mut result = String::with_capacity(input.len().div_ceil(3) * 4);
+    let mut result = String::with_capacity(bytes.len().div_ceil(3) * 4);
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = input.as_bytes();
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
@@ -1123,6 +1198,66 @@ pub fn base64_encode(input: &str) -> String {
         }
     }
     result
+}
+
+/// Standard base64 decode (padding and stray whitespace tolerated). Downloads
+/// pipe through `base64` in the container so binary files survive the exec
+/// stream instead of being mangled by lossy UTF-8 conversion.
+pub fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut buf: Vec<u8> = Vec::with_capacity(input.len() / 4 * 3);
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    for c in input.chars() {
+        if c == '=' || c == '\n' || c == '\r' || c == ' ' {
+            continue;
+        }
+        let v = CHARS
+            .iter()
+            .position(|&x| x as char == c)
+            .ok_or_else(|| format!("invalid base64 character: {:?}", c))?;
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            buf.push((acc >> bits) as u8);
+        }
+    }
+    Ok(buf)
+}
+
+/// Decoded result of a task_download: `content` is the exact text when the
+/// file is valid UTF-8 (`encoding: "utf8"`) or the base64 string for binary
+/// files (`encoding: "base64"`); `bytes` counts decoded bytes so `truncated`
+/// is exact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadedFile {
+    pub content: String,
+    pub encoding: &'static str,
+    pub bytes: usize,
+    pub truncated: bool,
+}
+
+pub fn decode_download_payload(b64: &str, max_bytes: usize) -> Result<DownloadedFile, String> {
+    let b64 = b64.trim();
+    let decoded = base64_decode(b64)?;
+    let bytes = decoded.len();
+    let truncated = bytes >= max_bytes;
+    let payload = match String::from_utf8(decoded) {
+        Ok(text) => DownloadedFile {
+            content: text,
+            encoding: "utf8",
+            bytes,
+            truncated,
+        },
+        Err(_) => DownloadedFile {
+            content: b64.to_string(),
+            encoding: "base64",
+            bytes,
+            truncated,
+        },
+    };
+    Ok(payload)
 }
 
 pub fn shell_quote(s: &str) -> String {
@@ -1159,9 +1294,18 @@ pub fn exec_audit_message(
 }
 
 pub fn audit_command(command: &[String]) -> String {
-    command.join(" ").chars().take(512).collect()
+    serde_json::to_string(command)
+        .unwrap_or_else(|_| "[]".into())
+        .chars()
+        .take(512)
+        .collect()
 }
 
+/// Resolves `path` inside the container (`readlink -f` on the deepest existing
+/// ancestor); callers re-validate the resolved path before use. Residual risk
+/// (accepted, documented in README): resolution and the write run as separate
+/// execs, so an in-container process can race a path-component swap — impact
+/// is confined to in-container integrity, not an escape vector.
 async fn resolve_path_in_container(
     rt: &Arc<dyn ContainerRuntime>,
     container_id: &str,

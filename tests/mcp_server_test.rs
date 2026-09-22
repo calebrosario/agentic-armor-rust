@@ -344,8 +344,24 @@ fn audit_command_truncates_at_512_chars_on_char_boundary() {
     assert!(t.chars().count() <= 512);
     assert!(t.is_char_boundary(t.len()), "must end on a UTF-8 boundary");
 
-    assert_eq!(audit_command(&[]), "");
-    assert_eq!(audit_command(&["echo".into(), "hi".into()]), "echo hi");
+    assert_eq!(audit_command(&[]), "[]");
+    assert_eq!(
+        audit_command(&["echo".into(), "hi".into()]),
+        "[\"echo\",\"hi\"]"
+    );
+}
+
+#[test]
+fn audit_command_preserves_argument_boundaries() {
+    use agentic_armor::mcp::server::audit_command;
+    let one_arg = audit_command(&["rm -rf /".into()]);
+    let two_args = audit_command(&["rm".into(), "-rf".into(), "/".into()]);
+    assert_eq!(one_arg, "[\"rm -rf /\"]");
+    assert_eq!(two_args, "[\"rm\",\"-rf\",\"/\"]");
+    assert_ne!(
+        one_arg, two_args,
+        "space-joining made ['a b'] and ['a','b'] forensically indistinguishable"
+    );
 }
 
 #[test]
@@ -744,4 +760,97 @@ async fn tombstoned_audit_events_replay_into_the_database() {
         0,
         "second replay after removal is a no-op"
     );
+}
+
+#[test]
+fn task_id_length_caps_at_58_for_network_name_room() {
+    use agentic_armor::mcp::server::{validate_task_id, MAX_TASK_ID_LEN};
+
+    assert!(validate_task_id("ok-ID_01").is_ok());
+    assert!(validate_task_id("").is_err());
+    assert!(validate_task_id("bad/id").is_err());
+    assert!(validate_task_id("has space").is_err());
+
+    assert_eq!(MAX_TASK_ID_LEN, 58);
+    let max_id = "a".repeat(58);
+    assert!(validate_task_id(&max_id).is_ok());
+    let too_long = "a".repeat(59);
+    assert!(validate_task_id(&too_long).is_err());
+    // 59 chars would produce a 65-char network name, over the runtime's 64 cap
+    assert!(format!("armor-{}", too_long).len() > 64);
+}
+
+#[test]
+fn download_payload_roundtrips_text_and_binary() {
+    use agentic_armor::mcp::server::{base64_decode, base64_encode_bytes, decode_download_payload};
+
+    let text = "hello\nworld\n";
+    let d = decode_download_payload(&base64_encode_bytes(text.as_bytes()), 1024).unwrap();
+    assert_eq!(d.content, text);
+    assert_eq!(d.encoding, "utf8");
+    assert_eq!(d.bytes, text.len());
+    assert!(!d.truncated);
+
+    let binary: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xFF, 0x00, 0x81,
+    ];
+    let b64 = base64_encode_bytes(&binary);
+    let d = decode_download_payload(&b64, 1024).unwrap();
+    assert_eq!(
+        d.encoding, "base64",
+        "invalid-UTF-8 payloads must not be mangled through lossy conversion"
+    );
+    assert_eq!(d.bytes, binary.len());
+    assert!(!d.truncated);
+    assert_eq!(
+        base64_decode(&d.content).unwrap(),
+        binary,
+        "client can decode losslessly"
+    );
+}
+
+#[test]
+fn download_truncation_flag_counts_decoded_bytes_exactly() {
+    use agentic_armor::mcp::server::{base64_encode_bytes, decode_download_payload};
+
+    let exact = "x".repeat(16);
+    let d = decode_download_payload(&base64_encode_bytes(exact.as_bytes()), 16).unwrap();
+    assert_eq!(d.bytes, 16);
+    assert!(
+        d.truncated,
+        "exactly max bytes counts as truncated (head -c may have cut the file)"
+    );
+
+    let under = "y".repeat(15);
+    let d = decode_download_payload(&base64_encode_bytes(under.as_bytes()), 16).unwrap();
+    assert_eq!(d.bytes, 15);
+    assert!(!d.truncated);
+}
+
+#[test]
+fn download_decode_rejects_garbage() {
+    use agentic_armor::mcp::server::decode_download_payload;
+
+    assert!(decode_download_payload("not valid base64!!!", 10).is_err());
+}
+
+#[test]
+fn optional_string_arrays_parse_strictly() {
+    use agentic_armor::mcp::server::arg_opt_str_array;
+    use serde_json::json;
+
+    let absent = json!({});
+    assert!(arg_opt_str_array(&absent, "env").unwrap().is_none());
+
+    let present = json!({"env": ["FOO=1", "BAR=two words"]});
+    assert_eq!(
+        arg_opt_str_array(&present, "env").unwrap(),
+        Some(vec!["FOO=1".to_string(), "BAR=two words".to_string()])
+    );
+
+    let wrong_type = json!({"env": "FOO=1"});
+    assert!(arg_opt_str_array(&wrong_type, "env").is_err());
+
+    let wrong_element = json!({"env": ["FOO=1", 42]});
+    assert!(arg_opt_str_array(&wrong_element, "env").is_err());
 }

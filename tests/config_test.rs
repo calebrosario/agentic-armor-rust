@@ -100,3 +100,14 @@ fn task_network_egress_parses() {
         "unknown values must fail open to the audited default, not to lockdown"
     );
 }
+
+#[test]
+fn csv_lists_trim_and_drop_empties() {
+    use agentic_armor::config::parse_csv_list;
+    assert!(parse_csv_list("").is_empty());
+    assert!(parse_csv_list(" , ,").is_empty());
+    assert_eq!(
+        parse_csv_list(" a.img:1 , b.img:2 ,, c.img:3"),
+        vec!["a.img:1", "b.img:2", "c.img:3"]
+    );
+}

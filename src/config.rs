@@ -53,6 +53,7 @@ pub struct Config {
     pub allowed_images: Vec<String>,
     pub allowed_path_prefixes: Vec<String>,
     pub forbidden_mount_patterns: Vec<String>,
+    pub allowed_mount_prefixes: Vec<String>,
     pub tombstone_path: std::path::PathBuf,
     pub handler_timeout_secs: u64,
 }
@@ -88,10 +89,13 @@ impl Default for Config {
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
-            allowed_images: vec![
-                "opencode-sandbox-base:latest".into(),
-                "opencode-sandbox-developer:latest".into(),
-            ],
+            allowed_images: match parse_csv_list(&env::var("ALLOWED_IMAGES").unwrap_or_default()) {
+                configured if !configured.is_empty() => configured,
+                _ => vec![
+                    "opencode-sandbox-base:latest".into(),
+                    "opencode-sandbox-developer:latest".into(),
+                ],
+            },
             allowed_path_prefixes: vec![
                 "/tmp/".into(),
                 "/home/opencode/".into(),
@@ -104,6 +108,9 @@ impl Default for Config {
                 "podman.sock".into(),
                 "/run/podman".into(),
             ],
+            allowed_mount_prefixes: parse_csv_list(
+                &env::var("ALLOWED_MOUNT_PREFIXES").unwrap_or_default(),
+            ),
             tombstone_path: tombstone_path_for(&database_url),
             handler_timeout_secs: env::var("AA_HANDLER_TIMEOUT_SECS")
                 .ok()
@@ -112,6 +119,14 @@ impl Default for Config {
                 .unwrap_or(900),
         }
     }
+}
+
+/// Splits a comma-separated env var into trimmed, non-empty entries.
+pub fn parse_csv_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Where audit events that could not be written to the database are parked

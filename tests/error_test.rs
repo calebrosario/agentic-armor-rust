@@ -10,6 +10,10 @@ fn test_error_codes() {
         ArmorError::ForbiddenMount("x".into()).code(),
         "FORBIDDEN_MOUNT"
     );
+    assert_eq!(
+        ArmorError::ImageNotAllowed("x".into()).code(),
+        "IMAGE_NOT_ALLOWED"
+    );
     assert_eq!(ArmorError::HostNetworkDenied.code(), "HOST_NETWORK_DENIED");
     assert_eq!(
         ArmorError::InvalidNetworkMode("x".into()).code(),

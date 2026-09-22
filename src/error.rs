@@ -23,6 +23,9 @@ pub enum ArmorError {
     #[error("Forbidden mount: {0}")]
     ForbiddenMount(String),
 
+    #[error("Image not allowed: {0}")]
+    ImageNotAllowed(String),
+
     #[error("Host network denied: set ALLOW_HOST_NETWORK=true to enable")]
     HostNetworkDenied,
 
@@ -53,6 +56,7 @@ impl ArmorError {
             ArmorError::InvalidPath(_) => "INVALID_PATH",
             ArmorError::PathRestricted => "PATH_RESTRICTED",
             ArmorError::ForbiddenMount(_) => "FORBIDDEN_MOUNT",
+            ArmorError::ImageNotAllowed(_) => "IMAGE_NOT_ALLOWED",
             ArmorError::HostNetworkDenied => "HOST_NETWORK_DENIED",
             ArmorError::InvalidNetworkMode(_) => "INVALID_NETWORK_MODE",
             ArmorError::InvalidMountConfig(_) => "INVALID_MOUNT_CONFIG",

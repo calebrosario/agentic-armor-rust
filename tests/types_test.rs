@@ -7,8 +7,6 @@ fn test_container_config_defaults() {
     assert!(config.command.is_none());
     assert_eq!(config.network, NetworkConfig::None);
     assert!(config.mounts.is_none());
-    assert!(config.readonly_rootfs.is_none());
-    assert!(config.cap_drop.is_none());
 }
 
 #[test]
@@ -23,8 +21,6 @@ fn test_container_config_builder_pattern() {
         memory_limit: Some(512 * 1024 * 1024),
         cpu_shares: Some(1024),
         pids_limit: Some(100),
-        readonly_rootfs: Some(true),
-        cap_drop: Some(vec!["ALL".into()]),
         ..Default::default()
     };
 

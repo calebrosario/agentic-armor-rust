@@ -1,0 +1,16 @@
+# cargo-audit configuration.
+# The security-audit CI job runs bare `cargo audit`, so ignores live here where
+# they are reviewed like any other change.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — rsa 0.9.10 "Marvin Attack" (timing sidechannel, medium).
+    # rsa enters Cargo.lock only through sqlx-mysql, which Cargo locks because it
+    # is an optional dependency of the sqlx facade — it is NEVER compiled under
+    # the features this crate enables (sqlite only). Verified with:
+    #   cargo tree -i rsa --all-features --target all   # -> nothing to print
+    # No fixed rsa release exists upstream, so every sqlx user carries this
+    # locked-but-unbuilt entry. Revisit when a patched rsa is released or when
+    # sqlx stops locking sqlx-mysql for feature-off consumers.
+    "RUSTSEC-2023-0071",
+]

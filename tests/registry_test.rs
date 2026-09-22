@@ -270,3 +270,25 @@ async fn user_version_records_schema_v2() {
         .expect("user_version");
     assert_eq!(version, 2, "migrate must stamp user_version=2");
 }
+
+#[tokio::test]
+async fn mark_running_moves_status_from_pending_to_running() {
+    let (reg, _pool) = fresh_registry_with_pool().await;
+    let lifecycle = TaskLifecycle::new(std::sync::Arc::new(reg.clone()));
+    lifecycle
+        .create_task("t-run", "task", None)
+        .await
+        .expect("create");
+    assert_eq!(
+        reg.get_by_id("t-run").await.unwrap().unwrap().status,
+        "pending",
+        "new tasks start pending"
+    );
+
+    lifecycle.mark_running("t-run").await.expect("mark running");
+    assert_eq!(
+        reg.get_by_id("t-run").await.unwrap().unwrap().status,
+        "running",
+        "mark_running must move the registry status so task_list stops lying"
+    );
+}

@@ -23,10 +23,6 @@ pub struct ArmorContainerConfig {
     pub memory_limit: Option<i64>,
     pub cpu_shares: Option<i64>,
     pub pids_limit: Option<i64>,
-    pub cap_drop: Option<Vec<String>>,
-    pub readonly_rootfs: Option<bool>,
-    pub no_new_privileges: Option<bool>,
-    pub user: Option<String>,
     pub auto_remove: Option<bool>,
 }
 
@@ -43,10 +39,6 @@ impl Default for ArmorContainerConfig {
             memory_limit: None,
             cpu_shares: None,
             pids_limit: None,
-            cap_drop: None,
-            readonly_rootfs: None,
-            no_new_privileges: None,
-            user: None,
             auto_remove: None,
         }
     }
