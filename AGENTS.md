@@ -56,7 +56,7 @@ agentic-armor-rust/
 
 - Hardcoded: `cap-drop: ALL`, read-only rootfs, `no-new-privileges`, user `opencode`, 512MB memory floor, PID clamp 10–1000
 - Image allowlist via `ALLOWED_IMAGES` (defaults: `opencode-sandbox-{base,developer}:latest`) → `ArmorError::ImageNotAllowed`
-- Mounts: blocklist (`forbidden_mount_patterns`) AND canonicalized source allowlist (`ALLOWED_MOUNT_PREFIXES`, empty = deny all bind/volume; tmpfs exempt)
+- Mounts: blocklist (`forbidden_mount_patterns`) AND canonicalized source allowlist (`ALLOWED_MOUNT_PREFIXES`, empty = deny all bind/volume; `..` segments rejected; tmpfs exempt)
 - Upload/download: prefix + charset allowlist, in-container canonicalization, final-symlink guard; downloads base64 round-trip (`encoding: utf8|base64`)
 - Exec: process-group wrap, verified timeout kills (`KillOutcome` taxonomy), handler ceiling `AA_HANDLER_TIMEOUT_SECS`
 
